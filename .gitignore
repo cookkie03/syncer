@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Runtime data — bind-mounted volumes (not source code)
+vdirsyncer/token/
+vdirsyncer/status/
+vtodo-notion/state/
+notion-backup/backup/
+caldav-backup/backup/
+
+# Legacy output folders
+logs-vtodo/
+caldav-backup-output/
+
+# Python virtual environment
+.venv/
+
+# Claude Code artifacts
+skills-lock.json
+upgrade-guide-*.md
+
+.git_old/
