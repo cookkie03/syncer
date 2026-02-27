@@ -1,0 +1,36 @@
+[general]
+# Status directory — persisted across runs
+status_path = "/data/status"
+
+# ──────────────────────────────────────────────
+# VEVENT: CalDAV server → Google Calendar
+# ──────────────────────────────────────────────
+
+[pair caldav_gcal]
+a = "caldav_calendars"
+b = "google_calendars"
+collections = [["Amore", "jdydvkzf", "2b0dd1de7531c7bf1b6665053e59351001c88701ad20e21955fd326ad1e536a3@group.calendar.google.com"], ["Cura personale", "iuvgoly", "afff0255646d1cf4a5ceda81aa064ac15f85534728adad5bb4d958d3926656b0@group.calendar.google.com"], ["Divertimento", "kkuykb", "f408b5737fe02fa424152020ef84b491fe5d36f9a1a15742562f94cb9e32d36d@group.calendar.google.com"], ["Extra", "umwkab", "029de6cb36c691cf1c21ea6baa02207e0b8df637e39b334361b509243a9c558a@group.calendar.google.com"], ["Famiglia", "mugegt", "7478603c8cbb30a042d24882607d8802365b7105c873424f30d938d662fb3e6b@group.calendar.google.com"], ["Istruzione", "ckoqez", "54ac7fbbb49e2514e699d51ee751753ed10528ea84d9dc17966bbbd0e2d8ce0c@group.calendar.google.com"], ["Lavoro", "eioyazqq", "7e2ca574972419b7cc304f5996868814836d3090821aca6e08d8b066e305bb28@group.calendar.google.com"]]
+# Only sync VEVENT items (not VTODO, not VJOURNAL)
+conflict_resolution = "b wins"
+
+[storage caldav_calendars]
+type = "caldav"
+url = "$CALDAV_URL"
+username = "$CALDAV_USERNAME"
+password = "$CALDAV_PASSWORD"
+item_types = ["VEVENT"]
+
+[storage google_calendars]
+type = "google_calendar"
+token_file = "$GOOGLE_TOKEN_FILE"
+# client_id and client_secret are required to initiate the OAuth flow
+# (vdirsyncer authorize) and are embedded in the token file afterwards.
+client_id = "$GOOGLE_CLIENT_ID"
+client_secret = "$GOOGLE_CLIENT_SECRET"
+
+# ──────────────────────────────────────────────
+# VCARD: CardDAV → Google Contacts
+# DISABLED: Google deprecated CardDAV access for
+# new OAuth apps in 2019. The API returns 403 on
+# .well-known/carddav regardless of token scopes.
+# ──────────────────────────────────────────────

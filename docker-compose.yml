@@ -1,0 +1,91 @@
+services:
+
+  # ── vdirsyncer: CalDAV → Google Calendar ──────────────────────────────────
+  vdirsyncer:
+    build:
+      context: ./vdirsyncer
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/vdirsyncer:local
+    restart: unless-stopped
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - 192.168.1.1
+      - 8.8.8.8
+    volumes:
+      - ./vdirsyncer/status:/data/status
+      - ./vdirsyncer/token:/data/token
+    environment:
+      - SYNC_INTERVAL_MINUTES=15
+    healthcheck:
+      test: ["CMD", "python", "-c", "import vdirsyncer; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── vtodo-notion: CalDAV VTODO ↔ Notion Database ──────────────────────────
+  vtodo-notion:
+    build:
+      context: ./vtodo-notion
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/vtodo-notion:local
+    restart: unless-stopped
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - 192.168.1.1
+      - 8.8.8.8
+    volumes:
+      - ./vtodo-notion/state:/data
+    environment:
+      - LOG_DIR=/data/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import caldav, notion_client; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── notion-backup: dual-track backup + hardlink snapshots ─────────────────
+  notion-backup:
+    build:
+      context: ./notion-backup
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/notion-backup:local
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./notion-backup/backup:/backup
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import requests; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── caldav-backup: backup CalDAV calendars and tasks to ICS ───────────────
+  caldav-backup:
+    build:
+      context: ./caldav-backup
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/caldav-backup:local
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./caldav-backup/backup:/backup
+    environment:
+      - CALDAV_BACKUP_DIR=/backup
+    command: ["--watch", "--interval", "3600"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import caldav; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s

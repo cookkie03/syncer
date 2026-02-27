@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(docker exec:*)",
+      "Bash(docker exec caldav-sync-vdirsyncer-1 cat /data/token/google.json 2>&1 | python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('scopes:', d.get\\('scopes'\\) or d.get\\('scope'\\)\\)\" 2>&1)",
+      "Bash(docker volume:*)",
+      "Bash(curl:*)",
+      "Bash(docker run:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker kill:*)",
+      "Bash(true:*)",
+      "WebFetch(domain:api.telegram.org)",
+      "Bash(docker volume ls | grep caldav && docker inspect caldav-sync_vdirsyncer-data 2>/dev/null | python3 -c \"import sys,json; v=json.load\\(sys.stdin\\); print\\(v[0]['Mountpoint']\\)\" 2>/dev/null)",
+      "Bash(python3:*)",
+      "Bash(echo === Syncing: $cal ===:*)",
+      "Bash(jobs:*)",
+      "Bash(docker stop:*)",
+      "WebFetch(domain:forum.vivaldi.net)",
+      "WebFetch(domain:community.synology.com)",
+      "WebFetch(domain:kb.synology.com)",
+      "WebFetch(domain:www.synology-forum.de)",
+      "Bash(echo Done:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(docker context:*)",
+      "Bash(python:*)",
+      "Bash(MSYS_NO_PATHCONV=1 docker run:*)",
+      "Bash(mkdir:*)",
+      "Bash(mv:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(MSYS_NO_PATHCONV=1 docker compose:*)",
+      "Bash(sqlite3:*)",
+      "Bash(ls:*)"
+    ]
+  }
+}
