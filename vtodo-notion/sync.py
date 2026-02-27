@@ -147,54 +147,38 @@ def with_retry(func):
                 if e.status == 400:
                     log.error("Validation error (not retrying): %s", e)
                     raise
-                # Altri errori API (429 rate limit, 5xx): contano verso il breaker
-                circuit_breaker_errors += 1
-                if circuit_breaker_errors >= CIRCUIT_BREAKER_THRESHOLD:
-                    circuit_breaker_triggered = True
-                    log.error("Circuit breaker triggered after %d errors", circuit_breaker_errors)
+                _handle_retry_error(e, attempt)
+                if circuit_breaker_triggered:
                     return None
-                if attempt < MAX_RETRIES - 1:
-                    wait_time = (2 ** attempt)
-                    log.warning("Attempt %d failed: %s. Retrying in %ds...", attempt + 1, e, wait_time)
-                    time.sleep(wait_time)
-                else:
-                    log.error("All %d attempts failed: %s", MAX_RETRIES, e)
-                    raise
             except Exception as e:
-                circuit_breaker_errors += 1
-                if circuit_breaker_errors >= CIRCUIT_BREAKER_THRESHOLD:
-                    circuit_breaker_triggered = True
-                    log.error("Circuit breaker triggered after %d errors", circuit_breaker_errors)
+                _handle_retry_error(e, attempt)
+                if circuit_breaker_triggered:
                     return None
-
-                if attempt < MAX_RETRIES - 1:
-                    wait_time = (2 ** attempt)
-                    log.warning("Attempt %d failed: %s. Retrying in %ds...", attempt + 1, e, wait_time)
-                    time.sleep(wait_time)
-                else:
-                    log.error("All %d attempts failed: %s", MAX_RETRIES, e)
-                    raise
         return None
     return wrapper
+
+
+def _handle_retry_error(e: Exception, attempt: int) -> None:
+    global circuit_breaker_errors, circuit_breaker_triggered
+    circuit_breaker_errors += 1
+    if circuit_breaker_errors >= CIRCUIT_BREAKER_THRESHOLD:
+        circuit_breaker_triggered = True
+        log.error("Circuit breaker triggered after %d errors", circuit_breaker_errors)
+        return
+    if attempt < MAX_RETRIES - 1:
+        wait_time = (2 ** attempt)
+        log.warning("Attempt %d failed: %s. Retrying in %ds...", attempt + 1, e, wait_time)
+        time.sleep(wait_time)
+    else:
+        log.error("All %d attempts failed: %s", MAX_RETRIES, e)
+        raise e
 
 
 def parse_ical_datetime(dt_value) -> tuple[Any, str | None]:
     if dt_value is None:
         return None, None
-    
-    iso_str = None
-    dt_obj = None
-    
-    if hasattr(dt_value, "dt"):
-        dt_obj = dt_value.dt
-    else:
-        dt_obj = dt_value
-    
-    if isinstance(dt_obj, datetime):
-        iso_str = dt_obj.isoformat()
-    elif isinstance(dt_obj, date):
-        iso_str = dt_obj.isoformat()
-    
+    dt_obj = dt_value.dt if hasattr(dt_value, "dt") else dt_value
+    iso_str = dt_obj.isoformat() if isinstance(dt_obj, (datetime, date)) else None
     return dt_obj, iso_str
 
 
@@ -412,44 +396,30 @@ def fetch_all_notion_pages(notion: Client, database_id: str) -> list[dict]:
     return all_pages
 
 
+def _get_rich_text(props: dict, key: str) -> str:
+    prop = props.get(key)
+    if prop and prop.get("rich_text"):
+        return prop["rich_text"][0].get("text", {}).get("content", "")
+    return ""
+
+
+def _get_select(props: dict, key: str, default: str = "") -> str:
+    prop = props.get(key)
+    if prop and prop.get("select"):
+        return prop["select"].get("name", default)
+    return default
+
+
 def parse_notion_page(page: dict) -> dict[str, Any]:
     props = page.get("properties", {})
-
-    uid = ""
-    if props.get("UID CalDAV") and props["UID CalDAV"].get("rich_text"):
-        uid = props["UID CalDAV"]["rich_text"][0].get("text", {}).get("content", "")
 
     summary = ""
     if props.get("Name") and props["Name"].get("title"):
         summary = props["Name"]["title"][0].get("text", {}).get("content", "")
 
-    description = ""
-    if props.get("Descrizione") and props["Descrizione"].get("rich_text"):
-        description = props["Descrizione"]["rich_text"][0].get("text", {}).get("content", "")
-
     due = None
     if props.get("Scadenza") and props["Scadenza"].get("date"):
         due = props["Scadenza"]["date"].get("start")
-
-    priority = "Nessuna"
-    if props.get("Priorità") and props["Priorità"].get("select"):
-        priority = props["Priorità"]["select"].get("name", "Nessuna")
-
-    location = ""
-    if props.get("Luogo") and props["Luogo"].get("rich_text"):
-        location = props["Luogo"]["rich_text"][0].get("text", {}).get("content", "")
-
-    url = ""
-    if props.get("URL") and props["URL"].get("url"):
-        url = props["URL"]["url"]
-
-    list_name = ""
-    if props.get("Lista") and props["Lista"].get("select"):
-        list_name = props["Lista"]["select"].get("name", "")
-
-    rrule = ""
-    if props.get("Periodicità") and props["Periodicità"].get("rich_text"):
-        rrule = props["Periodicità"]["rich_text"][0].get("text", {}).get("content", "")
 
     completato = False
     if props.get("Completato"):
@@ -457,21 +427,19 @@ def parse_notion_page(page: dict) -> dict[str, Any]:
         status_name = props["Completato"].get("status", {}).get("name", "")
         completato = status_name == "Done"
 
-    last_modified = page.get("last_edited_time", "")
-
     return {
         "page_id": page["id"],
-        "uid": uid,
+        "uid": _get_rich_text(props, "UID CalDAV"),
         "summary": summary,
-        "description": description,
+        "description": _get_rich_text(props, "Descrizione"),
         "due": due,
-        "priority": priority,
-        "location": location,
-        "url": url,
-        "list_name": list_name,
-        "rrule": rrule,
+        "priority": _get_select(props, "Priorità", "Nessuna"),
+        "location": _get_rich_text(props, "Luogo"),
+        "url": (props.get("URL") or {}).get("url") or "",
+        "list_name": _get_select(props, "Lista"),
+        "rrule": _get_rich_text(props, "Periodicità"),
         "completato": completato,
-        "last_modified": last_modified,
+        "last_modified": page.get("last_edited_time", ""),
     }
 
 
@@ -676,6 +644,13 @@ def sync_caldav_to_notion(vtodo_lists: list, notion: Client, database_id: str, s
     return stats
 
 
+def find_calendar_by_name(calendars: list, name: str):
+    for cal in calendars:
+        if str(cal.name) == name:
+            return cal
+    return None
+
+
 def sync_notion_to_caldav(notion: Client, database_id: str, calendars: list, state: SyncState) -> dict:
     stats = {"updated": 0, "skipped": 0, "archived": 0, "recurring_completed": 0, "errors": 0}
     log.info("=" * 60)
@@ -711,12 +686,7 @@ def sync_notion_to_caldav(notion: Client, database_id: str, calendars: list, sta
 
             # ── Gestione "Completato" spuntato da Notion ──────────────────────────────
             if completato:
-                # Trovare il calendario corretto
-                calendar = None
-                for cal in calendars:
-                    if str(cal.name) == data.get("list_name"):
-                        calendar = cal
-                        break
+                calendar = find_calendar_by_name(calendars, data.get("list_name"))
 
                 if has_rrule:
                     # Task ricorrente: NON scriviamo STATUS:COMPLETED su CalDAV.
@@ -770,11 +740,7 @@ def sync_notion_to_caldav(notion: Client, database_id: str, calendars: list, sta
                 stats["skipped"] += 1
                 continue
 
-            calendar = None
-            for cal in calendars:
-                if str(cal.name) == data.get("list_name"):
-                    calendar = cal
-                    break
+            calendar = find_calendar_by_name(calendars, data.get("list_name"))
 
             if not calendar:
                 log.warning("[Notion→CalDAV] ⚠ Calendar not found for list '%s', skipping UID=%s",
