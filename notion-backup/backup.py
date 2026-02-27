@@ -6,14 +6,12 @@ Track 1: Official API (Bearer token) → structured JSON
 Track 2: Internal export API (token_v2 cookie) → Markdown ZIP
 
 Both tracks run concurrently. A failure in one does NOT stop the other.
-Git versioning runs after both complete.
 """
 
 import json
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -45,7 +43,6 @@ NOTION_API_TOKEN = require_env("NOTION_API_TOKEN")
 NOTION_TOKEN_V2   = os.environ.get("NOTION_TOKEN_V2", "")
 NOTION_FILE_TOKEN = os.environ.get("NOTION_FILE_TOKEN", "")
 NOTION_SPACE_ID   = os.environ.get("NOTION_SPACE_ID", "")
-GIT_REMOTE_URL        = os.environ.get("GIT_REMOTE_URL", "")
 TELEGRAM_BOT_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID      = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -53,11 +50,6 @@ BACKUP_DIR        = Path("/backup")
 JSON_DIR          = BACKUP_DIR / "json"
 MD_LATEST_DIR     = BACKUP_DIR / "html" / "latest"
 MD_ARCHIVES_DIR   = BACKUP_DIR / "html" / "archives"
-SNAP_DAILY_DIR    = BACKUP_DIR / "snapshots" / "daily"
-SNAP_WEEKLY_DIR   = BACKUP_DIR / "snapshots" / "weekly"
-
-KEEP_DAILY   = 7   # days
-KEEP_WEEKLY  = 8   # weeks
 
 NOTION_API_BASE  = "https://api.notion.com/v1"
 NOTION_VERSION   = "2022-06-28"
@@ -418,133 +410,6 @@ def run_track2() -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Hardlink snapshots (daily 7 days · weekly 8 weeks)
-# ════════════════════════════════════════════════════════════════════════════
-
-def _hardlink_tree(src: Path, dst: Path) -> None:
-    """
-    Copy a directory tree from src to dst using hardlinks for all files.
-    Directories are created normally; files share inodes with the source.
-    Combined with the unlink-before-write pattern in save_json, this means
-    future writes to src do NOT affect any previously created snapshot.
-    """
-    dst.mkdir(parents=True, exist_ok=True)
-    for item in src.rglob("*"):
-        relative = item.relative_to(src)
-        target   = dst / relative
-        if item.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            os.link(item, target)
-
-
-def take_snapshots() -> None:
-    """
-    Create hardlink snapshots of the current JSON backup.
-
-    Policy:
-      - Daily  : one snapshot per calendar day, keep last KEEP_DAILY (7)
-      - Weekly : one snapshot per ISO week,     keep last KEEP_WEEKLY (8)
-
-    Snapshots that already exist for today / this week are skipped silently
-    so re-running the script on the same day is idempotent.
-    """
-    if not JSON_DIR.exists():
-        log.warning("[snapshots] JSON dir missing — nothing to snapshot")
-        return
-
-    SNAP_DAILY_DIR.mkdir(parents=True,  exist_ok=True)
-    SNAP_WEEKLY_DIR.mkdir(parents=True, exist_ok=True)
-
-    today    = datetime.now(timezone.utc).date()
-    iso      = today.isocalendar()
-    day_key  = today.isoformat()                      # 2025-01-17
-    week_key = f"{iso.year}-W{iso.week:02d}"          # 2025-W03
-
-    # ── Daily ─────────────────────────────────────────────────────────────
-    day_snap = SNAP_DAILY_DIR / day_key
-    if day_snap.exists():
-        # Remove any pre-existing directory (could be a partial copy from a
-        # crashed previous run) before recreating it cleanly.
-        shutil.rmtree(day_snap)
-        log.info("[snapshots] Removed incomplete/existing daily snapshot: %s", day_key)
-    log.info("[snapshots] Creating daily snapshot: %s", day_key)
-    _hardlink_tree(JSON_DIR, day_snap)
-    log.info("[snapshots] Daily snapshot ready: %s", day_key)
-
-    # Rotate: keep last KEEP_DAILY entries (sorted lexicographically = chronologically)
-    daily_snaps = sorted(p for p in SNAP_DAILY_DIR.iterdir() if p.is_dir())
-    for old in daily_snaps[:-KEEP_DAILY]:
-        shutil.rmtree(old)
-        log.info("[snapshots] Removed old daily snapshot: %s", old.name)
-
-    # ── Weekly ────────────────────────────────────────────────────────────
-    # Only create once per ISO week — unlike daily, do NOT overwrite if one
-    # already exists (weekly snapshots are a stable historical record).
-    week_snap = SNAP_WEEKLY_DIR / week_key
-    if not week_snap.exists():
-        log.info("[snapshots] Creating weekly snapshot: %s", week_key)
-        _hardlink_tree(JSON_DIR, week_snap)
-        log.info("[snapshots] Weekly snapshot ready: %s", week_key)
-    else:
-        log.info("[snapshots] Weekly snapshot already exists: %s", week_key)
-
-    # Rotate: keep last KEEP_WEEKLY entries
-    weekly_snaps = sorted(p for p in SNAP_WEEKLY_DIR.iterdir() if p.is_dir())
-    for old in weekly_snaps[:-KEEP_WEEKLY]:
-        shutil.rmtree(old)
-        log.info("[snapshots] Removed old weekly snapshot: %s", old.name)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# Git versioning
-# ════════════════════════════════════════════════════════════════════════════
-
-def git_commit(page_count: int, db_count: int) -> None:
-    """Commit all changes in /backup to git; optionally push to remote."""
-    cwd = str(BACKUP_DIR)
-
-    def run(*cmd: str) -> subprocess.CompletedProcess:
-        return subprocess.run(list(cmd), cwd=cwd, capture_output=True, text=True)
-
-    # Init repo if needed
-    if not (BACKUP_DIR / ".git").exists():
-        log.info("[git] Initializing repo in %s", cwd)
-        run("git", "init")
-        run("git", "config", "user.name",  "notion-backup")
-        run("git", "config", "user.email", "backup@localhost")
-
-    run("git", "add", ".")
-
-    status = run("git", "status", "--porcelain")
-    if not status.stdout.strip():
-        log.info("[git] No changes — skipping commit.")
-        return
-
-    ts  = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    msg = f"backup {ts} — {page_count} pages, {db_count} databases"
-    result = run("git", "commit", "-m", msg)
-    if result.returncode != 0:
-        log.error("[git] Commit failed:\n%s", result.stderr)
-        return
-    log.info("[git] Committed: %s", msg)
-
-    if GIT_REMOTE_URL:
-        log.info("[git] Pushing to remote...")
-        check = run("git", "remote", "get-url", "origin")
-        if check.returncode == 0:
-            run("git", "remote", "set-url", "origin", GIT_REMOTE_URL)
-        else:
-            run("git", "remote", "add", "origin", GIT_REMOTE_URL)
-        push = run("git", "push", "origin", "HEAD:main", "--force")
-        if push.returncode == 0:
-            log.info("[git] Push complete.")
-        else:
-            log.error("[git] Push failed:\n%s", push.stderr)
-
-
-# ════════════════════════════════════════════════════════════════════════════
 # Entry point
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -609,15 +474,6 @@ def main() -> None:
             "copy new token_v2 and file_token values, update .env, then restart the container."
         )
 
-    # Snapshots and git commit only run when Track 1 produced valid data
-    if results["t1_ok"]:
-        try:
-            take_snapshots()
-        except Exception as exc:
-            log.error("[snapshots] Error during snapshot rotation: %s", exc)
-        git_commit(results["page_count"], results["db_count"])
-    else:
-        log.warning("[git] Skipping git commit — Track 1 did not complete successfully")
     log.info("=== notion-backup done ===")
 
 

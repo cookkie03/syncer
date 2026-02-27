@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -23,23 +24,6 @@ from pathlib import Path
 from typing import Any
 
 import caldav
-
-# Load .env file if present (manual parsing to avoid extra dependency)
-env_path = Path(".env")
-if env_path.exists():
-    with open(env_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip()
-                # Remove quotes if present
-                if value and value[0] in ('"', "'") and value[-1] == value[0]:
-                    value = value[1:-1]
-                if key and value and key not in os.environ:
-                    os.environ[key] = value
-    print(f"Loaded environment from .env")
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -112,58 +96,6 @@ def connect_caldav() -> caldav.DAVClient:
         password=CALDAV_PASSWORD,
     )
     return client
-
-
-def discover_calendars(client: caldav.DAVClient) -> dict[str, list[dict]]:
-    """Discover all available calendars and todo lists."""
-    principal = client.principal()
-    all_calendars = principal.calendars()
-
-    calendars = {"vevent": [], "vtodo": []}
-
-    for cal in all_calendars:
-        # Get calendar home set to determine type
-        try:
-            # Check if calendar supports VEVENT (events)
-            if hasattr(cal, "get_supported_components"):
-                components = cal.get_supported_components()
-                if components:
-                    components = components.split(",")
-
-            # CalDAV calendars can have different component types
-            # We determine type by trying to fetch content
-            display_name = str(cal.name) if cal.name else cal.url.split("/")[-2]
-
-            # Try to get events
-            try:
-                events = cal.events()
-                if events:
-                    calendars["vevent"].append({
-                        "name": display_name,
-                        "url": str(cal.url),
-                        "count": len(events),
-                    })
-                    log.info("[Discover] Calendar: '%s' (%d events)", display_name, len(events))
-            except Exception:
-                pass
-
-            # Try to get todos
-            try:
-                todos = cal.todos(include_completed=True)
-                if todos:
-                    calendars["vtodo"].append({
-                        "name": display_name,
-                        "url": str(cal.url),
-                        "count": len(todos),
-                    })
-                    log.info("[Discover] VTODO list: '%s' (%d items)", display_name, len(todos))
-            except Exception:
-                pass
-
-        except Exception as exc:
-            log.warning("[Discover] Could not check calendar %s: %s", cal.url, exc)
-
-    return calendars
 
 
 def discover_all_calendars(client: caldav.DAVClient) -> tuple[list[dict], list[dict]]:
@@ -268,8 +200,6 @@ def export_todo_list(cal: Any, name: str, backup_path: Path, include_completed: 
 
 def sanitize_filename(name: str) -> str:
     """Sanitize string for use in filename."""
-    # Replace problematic characters
-    import re
     name = re.sub(r'[<>:"/\\|?*]', '_', name)
     name = name.strip()
     return name or "unnamed"
@@ -415,7 +345,6 @@ def run_backup() -> dict:
         "stats": stats,
     }
 
-    import json
     manifest_path = backup_path / "manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)

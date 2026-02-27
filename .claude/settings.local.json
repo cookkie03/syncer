@@ -34,7 +34,8 @@
       "Bash(git commit:*)",
       "Bash(MSYS_NO_PATHCONV=1 docker compose:*)",
       "Bash(sqlite3:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(wc:*)"
     ]
   }
 }
