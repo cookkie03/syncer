@@ -35,7 +35,9 @@
       "Bash(MSYS_NO_PATHCONV=1 docker compose:*)",
       "Bash(sqlite3:*)",
       "Bash(ls:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(ping:*)",
+      "Bash(docker:*)"
     ]
   }
 }

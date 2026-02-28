@@ -2,15 +2,15 @@
 .env
 
 # Runtime data — bind-mounted volumes (not source code)
-vdirsyncer/token/
-vdirsyncer/status/
-vtodo-notion/state/
-notion-backup/backup/
-caldav-backup/backup/
+*token/
+*status/
+*state/
+*backup/
 
 # Legacy output folders
 logs-vtodo/
 caldav-backup-output/
+backup/
 
 # Python virtual environment
 .venv/

@@ -89,3 +89,34 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── carddav-google-contacts: Bidirectional Contact Sync ───────────────────
+  carddav-google-contacts:
+    build:
+      context: ./carddav-google-contacts
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/carddav-google-contacts:local
+    restart: unless-stopped
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - 192.168.1.1
+      - 8.8.8.8
+    volumes:
+      - ./carddav-google-contacts/state:/data
+      - ./carddav-google-contacts/backup:/data/backup
+      - ./vdirsyncer/token:/data/token:ro
+    environment:
+      - LOG_DIR=/data/logs
+      - DB_FILE=/data/sync_contacts.db
+      - BACKUP_DIR=/data/backup
+      - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google_contacts.json
+      - SYNC_INTERVAL=30
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import googleapiclient, vobject, caldav; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s

@@ -268,6 +268,39 @@ def next_rrule_occurrence(rrule_str: str, from_date_iso: str | None) -> str | No
     return None
 
 
+def next_future_rrule_occurrence(rrule_str: str, base_due_iso: str | None) -> str | None:
+    """Calcola la prossima occorrenza futura (>= oggi) di un RRULE ricorrente.
+
+    Synology CalDAV non avanza il DUE sui VTODO ricorrenti: mantiene la data
+    base originale.  Questa funzione usa l'RRULE con dtstart=base_due per trovare
+    la prima occorrenza >= oggi, così Notion mostra la scadenza corretta.
+    Ritorna ISO date string (YYYY-MM-DD) o None se non calcolabile.
+    """
+    try:
+        if base_due_iso:
+            base = date.fromisoformat(base_due_iso[:10])
+        else:
+            return None
+
+        today = date.today()
+        # Se il DUE è già nel futuro, non serve ricalcolare
+        if base >= today:
+            return None
+
+        dtstart = datetime(base.year, base.month, base.day)
+        rule = rrulestr(rrule_str, dtstart=dtstart, ignoretz=True)
+
+        # Cerchiamo la prima occorrenza >= ieri (per includere "oggi" come valido)
+        search_from = datetime(today.year, today.month, today.day) - timedelta(days=1)
+        nxt = rule.after(search_from)
+        if nxt:
+            return nxt.date().isoformat()
+    except Exception as exc:
+        log.warning("next_future_rrule_occurrence failed (rrule=%r, base=%r): %s",
+                    rrule_str, base_due_iso, exc)
+    return None
+
+
 def parse_vtodo(vtodo_comp, list_name: str) -> dict[str, Any]:
     uid = str(vtodo_comp.uid.value) if hasattr(vtodo_comp, "uid") else None
     summary = str(vtodo_comp.summary.value) if hasattr(vtodo_comp, "summary") else ""
@@ -581,31 +614,63 @@ def sync_caldav_to_notion(vtodo_lists: list, notion: Client, database_id: str, s
     # Pre-fetch all active Notion pages once to avoid per-item API calls (rate limit prevention)
     log.info("[CalDAV→Notion] Pre-fetching all Notion pages for UID lookup cache...")
     all_notion_pages = fetch_all_notion_pages(notion, database_id)
-    notion_uid_map: dict[str, tuple[str, str]] = {}  # uid -> (page_id, last_edited_time)
+    # uid -> (page_id, last_edited_time, parsed_data)
+    notion_uid_map: dict[str, tuple[str, str, dict[str, Any]]] = {}
     for page in all_notion_pages:
         uid_prop = page.get("properties", {}).get("UID CalDAV", {}).get("rich_text", [])
         if uid_prop:
             page_uid = uid_prop[0].get("text", {}).get("content", "")
             if page_uid:
-                notion_uid_map[page_uid] = (page["id"], page.get("last_edited_time", ""))
+                parsed = parse_notion_page(page)
+                notion_uid_map[page_uid] = (page["id"], page.get("last_edited_time", ""), parsed)
     log.info("[CalDAV→Notion] Loaded %d Notion pages into UID lookup cache", len(notion_uid_map))
 
     total_caldav_todos = sum(len(todos) for _, todos in vtodo_lists)
     log.info("[CalDAV→Notion] === STARTING === Total VTODO items from CalDAV: %d", total_caldav_todos)
 
+    # Dedup: pre-scansiona tutti i VTODO e tieni solo l'istanza attiva per ogni UID
+    all_parsed: list[tuple[str, dict]] = []  # (list_name, data)
+    uid_best: dict[str, int] = {}  # uid -> index nell'all_parsed con l'istanza migliore
     for list_name, todos in vtodo_lists:
-        log.info("[CalDAV→Notion] Processing list '%s' with %d items", list_name, len(todos))
-
-        for idx, todo in enumerate(todos):
+        for todo in todos:
             try:
                 vobj = todo.vobject_instance
                 vtodo_comp = vobj.vtodo
-
                 data = parse_vtodo(vtodo_comp, list_name)
+                uid = data.get("uid")
+                if not uid:
+                    continue
+                idx_new = len(all_parsed)
+                all_parsed.append((list_name, data))
+                prev_idx = uid_best.get(uid)
+                if prev_idx is None:
+                    uid_best[uid] = idx_new
+                else:
+                    prev_data = all_parsed[prev_idx][1]
+                    prev_completed = prev_data.get("status") == "Completato"
+                    new_completed = data.get("status") == "Completato"
+                    if prev_completed and not new_completed:
+                        uid_best[uid] = idx_new
+                        log.info("[CalDAV→Notion] Duplicate UID %s: preferring active from %s over completed from %s",
+                                 uid[:30], list_name, all_parsed[prev_idx][0])
+                    elif not prev_completed and new_completed:
+                        log.info("[CalDAV→Notion] Duplicate UID %s: keeping active from %s, ignoring completed from %s",
+                                 uid[:30], all_parsed[prev_idx][0], list_name)
+            except Exception:
+                pass
+
+    # Filtra solo le istanze "vincitrici" per ogni UID
+    best_indices = set(uid_best.values())
+    deduped = [(ln, d) for i, (ln, d) in enumerate(all_parsed) if i in best_indices]
+    if len(deduped) < len(all_parsed):
+        log.info("[CalDAV→Notion] Deduplication: %d → %d unique UIDs", len(all_parsed), len(deduped))
+
+    for idx, (list_name, data) in enumerate(deduped):
+        try:
                 uid = data.get("uid")
 
                 log.debug("[CalDAV→Notion] [%s:%d/%d] UID=%s summary='%s' status='%s' rrule=%s due=%s",
-                          list_name, idx + 1, len(todos), uid,
+                          list_name, idx + 1, len(deduped), uid,
                           (data.get("summary") or "")[:50], data.get("status"),
                           data.get("rrule") or "", data.get("due") or "")
 
@@ -623,6 +688,7 @@ def sync_caldav_to_notion(vtodo_lists: list, notion: Client, database_id: str, s
                 notion_entry = notion_uid_map.get(uid)
                 existing_page_id = notion_entry[0] if notion_entry else None
                 notion_modified = notion_entry[1] if notion_entry else None
+                existing_notion_data = notion_entry[2] if notion_entry else None
 
                 log.debug("[CalDAV→Notion] UID=%s: existing_page_id=%s, notion_modified='%s', caldav_modified='%s'",
                           uid, existing_page_id, notion_modified, caldav_modified)
@@ -651,6 +717,25 @@ def sync_caldav_to_notion(vtodo_lists: list, notion: Client, database_id: str, s
                     force_update = True  # Deve propagare il nuovo DUE a Notion
                     log.info("[CalDAV→Notion] ↻ Recurring COMPLETED on CalDAV (keep active in Notion): UID=%s", uid)
 
+                # Synology non avanza il DUE sui VTODO ricorrenti: mantiene la data base
+                # originale.  Calcoliamo la prossima occorrenza futura dall'RRULE.
+                if has_rrule and data.get("due"):
+                    future_due = next_future_rrule_occurrence(data.get("rrule"), data.get("due"))
+                    if future_due:
+                        log.info("[CalDAV→Notion] ↻ Advancing recurring DUE %s → %s for UID=%s",
+                                 data["due"], future_due, uid)
+                        data["due"] = future_due
+                        force_update = True
+
+                # Confronto contenuti: se i dati sono identici, non serve riscrivere
+                # (anche se force_update è True per i ricorrenti COMPLETED/DUE avanzato)
+                if existing_page_id and existing_notion_data:
+                    if not data_changed(data, existing_notion_data):
+                        log.debug("[CalDAV→Notion] ○ SKIPPED (content identical): UID=%s", uid)
+                        stats["skipped"] += 1
+                        continue
+
+                # Timestamp check: se il contenuto è diverso ma Notion è più recente, skip
                 if not force_update and existing_page_id and notion_modified:
                     caldav_dt = _parse_ts(caldav_modified)
                     notion_dt = _parse_ts(notion_modified)
@@ -669,11 +754,39 @@ def sync_caldav_to_notion(vtodo_lists: list, notion: Client, database_id: str, s
                 else:
                     stats["errors"] += 1
 
-            except Exception as e:
+        except Exception as e:
                 log.error("[CalDAV→Notion] ✗ ERROR at index %d in list '%s': %s", idx, list_name, e)
                 stats["errors"] += 1
 
     return stats
+
+
+def _normalize_for_comparison(data: dict[str, Any]) -> dict[str, str]:
+    """Normalizza i campi di un task per confronto contenuti tra CalDAV e Notion.
+
+    Restituisce un dict di stringhe confrontabili. I timestamp (last_modified)
+    sono esclusi perché cambiano ad ogni scrittura — il confronto è solo sui
+    campi "semantici" del task.
+    """
+    due = (data.get("due") or "")[:10]          # YYYY-MM-DD o ""
+    is_done = data.get("completato", False) or data.get("status") == "Completato"
+
+    return {
+        "summary":     (data.get("summary") or "").strip(),
+        "description": (data.get("description") or "").strip()[:1990],
+        "due":         due,
+        "priority":    data.get("priority") or "Nessuna",
+        "completato":  str(is_done),
+        "location":    (data.get("location") or "").strip(),
+        "url":         (data.get("url") or "").strip(),
+        "rrule":       (data.get("rrule") or "").strip(),
+        "list_name":   (data.get("list_name") or "").strip(),
+    }
+
+
+def data_changed(source_data: dict[str, Any], target_data: dict[str, Any]) -> bool:
+    """Restituisce True se i campi semantici differiscono tra source e target."""
+    return _normalize_for_comparison(source_data) != _normalize_for_comparison(target_data)
 
 
 def find_calendar_by_name(calendars: list, name: str):
@@ -683,7 +796,8 @@ def find_calendar_by_name(calendars: list, name: str):
     return None
 
 
-def sync_notion_to_caldav(notion: Client, database_id: str, calendars: list, state: SyncState) -> dict:
+def sync_notion_to_caldav(notion: Client, database_id: str, calendars: list, state: SyncState,
+                          caldav_data_map: dict[str, dict[str, Any]] | None = None) -> dict:
     stats = {"updated": 0, "skipped": 0, "archived": 0, "recurring_completed": 0, "errors": 0}
     log.info("=" * 60)
     log.info("[SYNC] Starting Notion → CalDAV sync")
@@ -767,6 +881,21 @@ def sync_notion_to_caldav(notion: Client, database_id: str, calendars: list, sta
                 continue
 
             # ── Flusso normale: sincronizza modifiche da Notion → CalDAV ─────────────
+
+            # Confronto contenuti: per i task ricorrenti, confronta usando il DUE
+            # base originale (non quello calcolato mostrato in Notion).
+            compare_data = data
+            if has_rrule and caldav_data_map and uid in caldav_data_map:
+                original_due = caldav_data_map[uid].get("due")
+                if original_due:
+                    compare_data = {**data, "due": original_due}
+
+            if caldav_data_map and uid in caldav_data_map:
+                if not data_changed(compare_data, caldav_data_map[uid]):
+                    log.debug("  ○ Skipped (content identical): %s", uid)
+                    stats["skipped"] += 1
+                    continue
+
             caldav_dt = _parse_ts(caldav_modified)
             notion_dt = _parse_ts(notion_modified)
             if caldav_dt and notion_dt and notion_dt <= caldav_dt:
@@ -782,7 +911,18 @@ def sync_notion_to_caldav(notion: Client, database_id: str, calendars: list, sta
                 stats["skipped"] += 1
                 continue
 
-            ical_data = build_ical_todo(data)
+            # Task ricorrenti: Notion mostra il DUE calcolato (prossima occorrenza
+            # futura) ma su CalDAV deve restare il DUE base originale per non
+            # corrompere l'RRULE. Ripristiniamo il DUE originale dal CalDAV data map.
+            write_data = data
+            if has_rrule and caldav_data_map and uid in caldav_data_map:
+                original_due = caldav_data_map[uid].get("due")
+                if original_due and original_due != data.get("due"):
+                    write_data = {**data, "due": original_due}
+                    log.debug("  ↻ Recurring: restoring original CalDAV DUE %s (Notion had %s) for %s",
+                              original_due, data.get("due"), uid)
+
+            ical_data = build_ical_todo(write_data)
 
             if update_caldav_todo(calendar, uid, ical_data):
                 stats["updated"] += 1
@@ -797,6 +937,83 @@ def sync_notion_to_caldav(notion: Client, database_id: str, calendars: list, sta
     log.info("[Notion→CalDAV] Complete: updated=%d, skipped=%d, archived=%d, recurring_completed=%d, errors=%d",
              stats["updated"], stats["skipped"], stats["archived"], stats["recurring_completed"], stats["errors"])
     log.info("=" * 60)
+    return stats
+
+
+def cleanup_completed_recurring(client: caldav.DAVClient, max_age_days: int = 10) -> dict:
+    """Elimina VTODO ricorrenti completati più vecchi di max_age_days.
+
+    Synology CalDAV tiene una copia COMPLETED per ogni occorrenza completata
+    di un task ricorrente. Queste copie fantasma si accumulano e confondono
+    il sync (duplicati UID, conteggi gonfiati). Questa routine le rimuove
+    automaticamente se il COMPLETED è avvenuto da più di max_age_days giorni.
+    """
+    stats = {"deleted": 0, "skipped": 0, "errors": 0}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+
+    try:
+        principal = client.principal()
+        calendars = principal.calendars()
+    except Exception as e:
+        log.error("[Cleanup] Cannot connect to CalDAV: %s", e)
+        stats["errors"] += 1
+        return stats
+
+    for cal in calendars:
+        name = str(cal.name) if cal.name else "?"
+        try:
+            todos = cal.todos(include_completed=True)
+        except Exception as e:
+            log.warning("[Cleanup] Could not read %s: %s", name, e)
+            continue
+
+        for todo in todos:
+            try:
+                vobj = todo.vobject_instance
+                vtodo = vobj.vtodo
+
+                status = str(vtodo.status.value) if hasattr(vtodo, "status") else ""
+                has_rrule = hasattr(vtodo, "rrule")
+
+                if status != "COMPLETED" or not has_rrule:
+                    continue
+
+                # Controlla COMPLETED timestamp (o LAST-MODIFIED come fallback)
+                completed_dt = None
+                if hasattr(vtodo, "completed"):
+                    completed_dt = vtodo.completed.value
+                elif hasattr(vtodo, "last_modified"):
+                    completed_dt = vtodo.last_modified.value
+
+                if completed_dt is None:
+                    continue
+
+                # Normalizza a aware datetime per il confronto
+                if hasattr(completed_dt, "tzinfo") and completed_dt.tzinfo is None:
+                    completed_dt = completed_dt.replace(tzinfo=timezone.utc)
+
+                if completed_dt < cutoff:
+                    summary = str(vtodo.summary.value)[:40] if hasattr(vtodo, "summary") else "?"
+                    uid = str(vtodo.uid.value)[:30] if hasattr(vtodo, "uid") else "?"
+                    try:
+                        todo.delete()
+                        stats["deleted"] += 1
+                        log.debug("[Cleanup] Deleted recurring completed: %s (%s) from [%s]",
+                                  summary, uid, name)
+                    except Exception as e:
+                        log.warning("[Cleanup] Failed to delete %s: %s", uid, e)
+                        stats["errors"] += 1
+                else:
+                    stats["skipped"] += 1
+            except Exception:
+                pass
+
+    if stats["deleted"] > 0:
+        log.info("[Cleanup] Deleted %d completed recurring VTODOs (older than %d days), "
+                 "skipped %d recent, errors %d",
+                 stats["deleted"], max_age_days, stats["skipped"], stats["errors"])
+    else:
+        log.debug("[Cleanup] No completed recurring VTODOs older than %d days to clean", max_age_days)
     return stats
 
 
@@ -822,7 +1039,29 @@ def sync():
     notion = Client(auth=NOTION_TOKEN)
     
     vtodo_lists = fetch_all_caldav_todos(client)
-    
+
+    # Costruisce una mappa UID → dati CalDAV parsati per il confronto contenuti
+    # e per ripristinare il DUE base originale nei task ricorrenti (Notion→CalDAV).
+    caldav_data_map: dict[str, dict[str, Any]] = {}
+    for list_name, todos in vtodo_lists:
+        for todo in todos:
+            try:
+                vobj = todo.vobject_instance
+                vtodo_comp = vobj.vtodo
+                data = parse_vtodo(vtodo_comp, list_name)
+                uid = data.get("uid")
+                if uid:
+                    # Se UID duplicato, preferisci l'istanza attiva (non COMPLETED)
+                    existing = caldav_data_map.get(uid)
+                    if existing and existing.get("completato") and not data.get("completato"):
+                        log.info("[CalDAV] Duplicate UID %s: replacing COMPLETED (%s) with active (%s)",
+                                 uid[:30], existing.get("list_name"), data.get("list_name"))
+                    elif existing and not existing.get("completato"):
+                        continue  # già abbiamo l'istanza attiva, ignora la COMPLETED
+                    caldav_data_map[uid] = data
+            except Exception:
+                pass
+
     if not vtodo_lists:
         log.info("No CalDAV VTODO items found.")
     else:
@@ -841,7 +1080,8 @@ def sync():
     circuit_breaker_triggered = False
 
     log.info("-" * 40)
-    notion_stats = sync_notion_to_caldav(notion, NOTION_DATABASE_ID, calendars, state)
+    notion_stats = sync_notion_to_caldav(notion, NOTION_DATABASE_ID, calendars, state,
+                                         caldav_data_map=caldav_data_map)
     log.info(
         "Notion → CalDAV: updated=%d, skipped=%d, archived=%d, recurring_completed=%d, errors=%d",
         notion_stats["updated"], notion_stats["skipped"],
@@ -850,6 +1090,9 @@ def sync():
 
     state.last_sync = datetime.now().isoformat()
     save_state(state)
+
+    # Pulizia automatica: rimuovi VTODO ricorrenti completati > 10 giorni
+    cleanup_completed_recurring(client, max_age_days=10)
 
     # Notify if error rate is high (>20% of items failed)
     total_items = sum([
