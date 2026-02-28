@@ -15,6 +15,9 @@ caldav-backup-output/
 # Python virtual environment
 .venv/
 
+# Python bytecode cache
+__pycache__/
+
 # Claude Code artifacts
 skills-lock.json
 upgrade-guide-*.md
