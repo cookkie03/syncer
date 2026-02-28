@@ -9,7 +9,7 @@ import sys
 import json
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from dateutil.rrule import rrulestr
 from pathlib import Path
 from typing import Any
@@ -214,11 +214,34 @@ def extract_rrule(vtodo_comp) -> str | None:
 
 
 def extract_last_modified(vtodo_comp) -> str | None:
-    if hasattr(vtodo_comp, "last-modified"):
-        return str(vtodo_comp.last_modified.value)
-    if hasattr(vtodo_comp, "dtstamp"):
-        return str(vtodo_comp.dtstamp.value)
-    return datetime.now().isoformat()
+    dt_val = None
+    if hasattr(vtodo_comp, "last_modified"):
+        dt_val = vtodo_comp.last_modified.value
+    elif hasattr(vtodo_comp, "dtstamp"):
+        dt_val = vtodo_comp.dtstamp.value
+
+    if dt_val is not None:
+        if isinstance(dt_val, (datetime, date)):
+            return dt_val.isoformat()
+        return str(dt_val)
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_ts(ts: str | None) -> datetime | None:
+    """Parse a timestamp string from CalDAV or Notion into a naive UTC datetime.
+
+    Handles both CalDAV format ('2024-03-15T10:30:00+00:00') and
+    Notion format ('2024-03-15T10:30:00.000Z').  Returns a naive
+    datetime (tzinfo stripped) so the two sides are always comparable.
+    """
+    if not ts:
+        return None
+    try:
+        normalized = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        return dt.replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
 
 
 def next_rrule_occurrence(rrule_str: str, from_date_iso: str | None) -> str | None:
@@ -479,12 +502,16 @@ def build_ical_todo(data: dict[str, Any], existing_vtodo=None) -> str:
     else:
         status = "NEEDS-ACTION"
 
+    now_utc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         "PRODID:-//vtodo-notion//EN",
         "BEGIN:VTODO",
         f"UID:{uid}",
+        f"DTSTAMP:{now_utc}",
+        f"LAST-MODIFIED:{now_utc}",
         f"SUMMARY:{summary}",
         f"STATUS:{status}",
         f"PRIORITY:{priority}",
@@ -617,15 +644,20 @@ def sync_caldav_to_notion(vtodo_lists: list, notion: Client, database_id: str, s
                 # Task ricorrente con STATUS:COMPLETED: Synology potrebbe essere in transizione
                 # tra un'istanza e la successiva. Lo mostriamo sempre come attivo in Notion
                 # e aggiorniamo la Scadenza con il nuovo DUE che il server ha già impostato.
+                force_update = False
                 if is_completed and has_rrule:
                     data["status"] = "In corso"
                     data["completato"] = False
+                    force_update = True  # Deve propagare il nuovo DUE a Notion
                     log.info("[CalDAV→Notion] ↻ Recurring COMPLETED on CalDAV (keep active in Notion): UID=%s", uid)
 
-                if existing_page_id and notion_modified and caldav_modified <= notion_modified:
-                    log.info("[CalDAV→Notion] ○ SKIPPED (Notion more recent): UID=%s", uid)
-                    stats["skipped"] += 1
-                    continue
+                if not force_update and existing_page_id and notion_modified:
+                    caldav_dt = _parse_ts(caldav_modified)
+                    notion_dt = _parse_ts(notion_modified)
+                    if caldav_dt and notion_dt and caldav_dt <= notion_dt:
+                        log.info("[CalDAV→Notion] ○ SKIPPED (Notion more recent): UID=%s", uid)
+                        stats["skipped"] += 1
+                        continue
 
                 if upsert_notion_page(notion, database_id, data, existing_page_id):
                     if existing_page_id:
@@ -735,7 +767,9 @@ def sync_notion_to_caldav(notion: Client, database_id: str, calendars: list, sta
                 continue
 
             # ── Flusso normale: sincronizza modifiche da Notion → CalDAV ─────────────
-            if caldav_modified and notion_modified <= caldav_modified:
+            caldav_dt = _parse_ts(caldav_modified)
+            notion_dt = _parse_ts(notion_modified)
+            if caldav_dt and notion_dt and notion_dt <= caldav_dt:
                 log.info("  ○ Skipped (CalDAV more recent): %s", uid)
                 stats["skipped"] += 1
                 continue
