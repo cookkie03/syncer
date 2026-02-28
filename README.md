@@ -5,6 +5,7 @@ Self-hosted sync stack for Synology NAS (DSM 7.x) or any Windows/Linux/Mac machi
 | Service | What it does | Schedule |
 |---|---|---|
 | `vdirsyncer` | CalDAV VEVENT ↔ Google Calendar (bidirectional, GCal wins on conflict) | every 15 min |
+| `carddav-google-contacts` | CardDAV ↔ Google Contacts (bidirectional via People API) | every 30 min |
 | `vtodo-notion` | CalDAV VTODO ↔ Notion database (bidirectional) | every 10 min |
 | `notion-backup` | Dual-track Notion backup: JSON via API + HTML ZIP via native export · hardlink snapshots · git versioning | daily (configurable) |
 | `caldav-backup` | Full CalDAV backup (VEVENT + VTODO) exported as `.ics` files | every 60 min |
@@ -18,7 +19,7 @@ All services self-schedule via **supercronic** — no external cron or Task Sche
 - **Docker Engine ≥ 24** and **Docker Compose v2** (`docker compose`)
   - **Windows**: install [Docker Desktop](https://www.docker.com/products/docker-desktop/) — make sure it is running before any `docker` command
   - **Synology NAS (DSM 7.x)**: install **Container Manager** from Package Center
-- A **Google Cloud project** with **Google Calendar API** enabled
+- A **Google Cloud project** with **Google Calendar API** and **Google People API** enabled
 - A **Notion account** with an internal integration token
 
 ---
@@ -39,15 +40,15 @@ The sections below explain where to find each value. Do not commit `.env` to git
 
 ---
 
-## Step 2 — Google OAuth setup (vdirsyncer)
+## Step 2 — Google OAuth setup (Calendar & Contacts)
 
-vdirsyncer syncs CalDAV calendars to Google Calendar via OAuth 2.0. This is a **one-time interactive step** that must be done on a machine with a browser (not via SSH).
+vdirsyncer syncs CalDAV calendars to Google Calendar, and `carddav-google-contacts` syncs contacts. Both require OAuth 2.0. This is a **one-time interactive step** that must be done on a machine with a browser (not via SSH).
 
 ### 2.1 — Enable APIs in Google Cloud Console
 
 1. Go to [console.cloud.google.com](https://console.cloud.google.com)
 2. Create or select a project
-3. Enable the **Google Calendar API** (APIs & Services → Library)
+3. Enable the **Google Calendar API** and the **Google People API** (APIs & Services → Library)
 
 ### 2.2 — Create OAuth credentials
 
@@ -59,66 +60,49 @@ vdirsyncer syncs CalDAV calendars to Google Calendar via OAuth 2.0. This is a **
    GOOGLE_CLIENT_SECRET=GOCSPX-...
    ```
 
-> If prompted to configure the OAuth consent screen, set it to **External**, add your Google account as a test user, and add the scope `https://www.googleapis.com/auth/calendar`.
+> If prompted to configure the OAuth consent screen, set it to **External**, add your Google account as a test user, and add the scopes `https://www.googleapis.com/auth/calendar` and `https://www.googleapis.com/auth/contacts`.
 
 ### 2.3 — Run the authorization flow
 
-vdirsyncer starts a local HTTP server on a **random port** and redirects the browser there to capture the OAuth code. Because Docker Desktop on Windows/Mac does not bridge random container ports to the host, the most reliable approach is to run `vdirsyncer authorize` **directly on the host machine** (not inside Docker), obtain the token file, then copy it into the Docker volume.
-
-#### Option A — Run natively on Windows / Mac / Linux (recommended)
+We provide a helper script (`authorize-google.py`) to generate tokens for both Calendar and Contacts. Because Docker Desktop on Windows/Mac does not bridge random container ports to the host natively, run the script **directly on the host machine** (not inside Docker).
 
 ```bash
-pip install "vdirsyncer[google]"
+# Install requirements locally
+pip install "vdirsyncer[google]" google-auth-oauthlib
 ```
 
-Create the config file from the template (replace variable values with what is in your `.env`):
+Run the authorization script:
 
 ```bash
-# Linux / Mac
-mkdir -p ~/.config/vdirsyncer
-envsubst < vdirsyncer/config.template > ~/.config/vdirsyncer/config
-
-# Windows PowerShell — manually copy config.template to:
-# %USERPROFILE%\.config\vdirsyncer\config
-# and replace $CALDAV_URL, $CALDAV_USERNAME, $CALDAV_PASSWORD,
-# $CARDDAV_URL, $GOOGLE_TOKEN_FILE, $GOOGLE_CLIENT_ID, $GOOGLE_CLIENT_SECRET
-# with the actual values from .env
+python authorize-google.py
 ```
 
-Set the token output path and authorize:
+The script will open a browser to authorize **Google Calendar** (for vdirsyncer), and then open a second prompt to authorize **Google Contacts** (People API). Log in, click **Allow** for both, and the terminal will confirm success. 
+
+It generates two files in your home directory:
+- `google.json`
+- `google_contacts.json`
+
+> **Synology NAS / SSH sessions**: SSH has no browser. Run the python script on your Windows/Mac machine first to get the tokens, then follow step 2.4 to copy them to the NAS volume.
+
+### 2.4 — Copy the tokens into the Docker volume
+
+Load the tokens into the Docker volume so the containers can use them:
 
 ```bash
-# Linux / Mac
-export GOOGLE_TOKEN_FILE="$HOME/google.json"
-vdirsyncer authorize
+# Replace 'syncer' with your actual project folder prefix if different
 
-# Windows PowerShell
-$env:GOOGLE_TOKEN_FILE = "$HOME\google.json"
-vdirsyncer authorize
-```
-
-The command opens a browser tab automatically. Log in, click **Allow**, and the terminal confirms `"Authorization successful."` — a `google.json` file is written to your home directory.
-
-#### Option B — Run inside Docker (Linux hosts only)
-
-On Linux (not Docker Desktop), the container shares the host network, so this works:
-
-```bash
-docker compose run --rm --network=host vdirsyncer vdirsyncer authorize
-```
-
-> **Synology NAS / SSH sessions**: SSH has no browser. Run Option A on your Windows/Mac machine first to get the token, then follow step 2.4 to copy it to the NAS volume.
-
-### 2.4 — (Optional) Copy a pre-existing token into the volume
-
-If you already have a `google.json` token from a previous local `vdirsyncer authorize`, you can load it into the Docker volume:
-
-```bash
-# Replace the volume name with your actual project folder prefix
+# 1. Calendar token
 docker run --rm \
   -v syncer_vdirsyncer_token:/data/token \
   -v "$HOME/google.json":/src/google.json \
   alpine cp /src/google.json /data/token/google.json
+
+# 2. Contacts token
+docker run --rm \
+  -v syncer_vdirsyncer_token:/data/token \
+  -v "$HOME/google_contacts.json":/src/google_contacts.json \
+  alpine cp /src/google_contacts.json /data/token/google_contacts.json
 ```
 
 ---
@@ -309,6 +293,7 @@ docker compose logs -f
 # Single service, last 100 lines + live
 docker compose logs -f --tail=100 vtodo-notion
 docker compose logs -f --tail=100 vdirsyncer
+docker compose logs -f --tail=100 carddav-google-contacts
 docker compose logs -f --tail=100 notion-backup
 docker compose logs -f --tail=100 caldav-backup
 
@@ -321,6 +306,7 @@ docker compose ps
 | Service | Healthy output | Warning signs |
 |---|---|---|
 | `vtodo-notion` | `Sync complete` · `errors=0` | `✗ ERROR` · `Circuit breaker triggered` · `Fatal sync error` |
+| `carddav-google-contacts` | `Sync complete: Google (+0, ~0)...` | `Error updating Google contact` · `Circuit breaker triggered` |
 | `vdirsyncer` | `Syncing caldav_gcal/...` (no `error:` lines) | `error:` · `401` / `403` · `name resolution` |
 | `notion-backup` | `Tracks complete — JSON backup: OK` | `[Track1] Fatal` · `[Track2] FAILED` · `token_v2 or file_token may have expired` |
 | `caldav-backup` | `Backup complete! Calendars: N` | `Error exporting` · `Required environment variable` |
@@ -333,6 +319,13 @@ docker compose ps
   ```
   CalDAV → Notion: created=0, updated=2, skipped=45, archived=0, errors=0
   Notion → CalDAV: updated=1, skipped=46, archived=0, recurring_completed=0, errors=0
+  ```
+
+**carddav-google-contacts (CardDAV ↔ Google Contacts):**
+- Open Google Contacts and check that they match your CardDAV address book.
+- Successful sync log line:
+  ```
+  Sync complete: Google (+0, ~1), CardDAV (+0, ~0), skipped 150, errors 0
   ```
 
 **vdirsyncer (CalDAV ↔ Google Calendar):**
@@ -356,9 +349,9 @@ If `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set, all four services send a
 
 | Event | Who sends it |
 |---|---|
-| Sync errors > 20% of items | `vtodo-notion` |
-| Circuit breaker activated | `vtodo-notion` |
-| Fatal crash | `vtodo-notion` |
+| Sync errors > 20% of items | `vtodo-notion`, `carddav-google-contacts` |
+| Circuit breaker activated | `vtodo-notion`, `carddav-google-contacts` |
+| Fatal crash | `vtodo-notion`, `carddav-google-contacts` |
 | Sync error (DNS, auth, etc.) | `vdirsyncer` |
 | Daily heartbeat (sync OK) | `vdirsyncer` |
 | Track 1 or Track 2 failed | `notion-backup` |
@@ -446,13 +439,14 @@ Files are overwritten in-place on every backup (hourly). There is no rotation �
 | Variable | Service | Required | Default | Description |
 |---|---|---|---|---|
 | `CALDAV_URL` | vdirsyncer, vtodo-notion, caldav-backup | ✓ | — | CalDAV server root URL |
-| `CARDDAV_URL` | vdirsyncer | ✓ | — | CardDAV server root URL |
+| `CARDDAV_URL` | carddav-google-contacts | ✓ | — | CardDAV server root URL |
 | `CALDAV_USERNAME` | all | ✓ | — | CalDAV / CardDAV username |
 | `CALDAV_PASSWORD` | all | ✓ | — | CalDAV / CardDAV password |
-| `GOOGLE_CLIENT_ID` | vdirsyncer | ✓ | — | Google OAuth client ID |
-| `GOOGLE_CLIENT_SECRET` | vdirsyncer | ✓ | — | Google OAuth client secret |
+| `GOOGLE_CLIENT_ID` | vdirsyncer, contacts | ✓ | — | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | vdirsyncer, contacts | ✓ | — | Google OAuth client secret |
 | `GOOGLE_TOKEN_FILE` | vdirsyncer | ✓ | `/data/token/google.json` | Do not change |
-| `SYNC_INTERVAL_MINUTES` | vdirsyncer, vtodo-notion | — | `60` / `10` | Sync interval in minutes |
+| `GOOGLE_CONTACTS_TOKEN_FILE` | carddav-google-contacts | ✓ | `/data/token/google_contacts.json` | Generated by auth script |
+| `SYNC_INTERVAL_MINUTES` | vdirsyncer, vtodo-notion, contacts | — | `60` / `10` / `30` | Sync interval in minutes |
 | `NOTION_TOKEN` | vtodo-notion | ✓ | — | Notion integration token (`ntn_...`) |
 | `NOTION_DATABASE_ID` | vtodo-notion | ✓ | — | Target Notion database ID |
 | `NOTION_SYNC_LOG_PATH` | vtodo-notion | — | `./logs-vtodo` | Host path for sync log file |
@@ -474,6 +468,7 @@ Files are overwritten in-place on every backup (hourly). There is no rotation �
 
 - All services schedule themselves via **supercronic** — no external cron needed
 - `vtodo-notion` is **bidirectional**: conflict resolution is based on `last-modified` timestamp (most recent write wins)
+- `carddav-google-contacts` is **bidirectional**: uses Google's People API mapping CardDAV `UID` to Google's `resourceName` via `externalIds`. Resolves conflict based on local SQLite cache and ETag matching.
 - `vdirsyncer` is **bidirectional**: new/changed events propagate in both directions; when both sides differ simultaneously, **GCal wins** (`conflict_resolution = "b wins"`) — correct for shared meeting invitations where you are not the organizer. `My Calendar` (`l.manca03@gmail.com`) is excluded from sync to avoid 403 errors on read-only events.
 - `notion-backup` Track 1 respects the Notion API rate limit (3 req/s, token-bucket)
 - Snapshots use `unlink`-before-write: future writes to `json/` never corrupt inode of older snapshots
@@ -482,6 +477,9 @@ Files are overwritten in-place on every backup (hourly). There is no rotation �
 ---
 
 ## Known issues / TODO
+
+### carddav-google-contacts — Birthday date formats
+vCard `BDAY` fields can arrive in multiple formats (`19900115`, `--0115`, `1990-01-15`). Some third-party apps confuse DD/MM vs MM/DD, producing swapped birthdays. The sync service includes an automatic diagnostic that logs a `WARNING` for every ambiguous date (e.g. `02-01` which could be Jan 2nd or Feb 1st) and always normalizes output to the People API format `{year, month, day}`.
 
 ### vdirsyncer — Apple Reminders UIDs
 
@@ -546,29 +544,3 @@ Outlook meeting invitations sometimes produce base64-encoded UIDs containing `/`
 - Reuse `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` with scope `https://www.googleapis.com/auth/tasks`
 - One CalDAV VTODO list → one Google Tasks list; use VTODO `UID` as idempotent anchor in task notes
 - Fields without Tasks equivalent (priority, RRULE, location): store as structured text in the `notes` field
-
----
-
-## Future: Google Contacts sync (not yet implemented)
-
-**Goal**: a `carddav-gcontacts` container that syncs CardDAV contacts ↔ Google Contacts bidirectionally.
-
-**Why vdirsyncer `google_contacts` doesn't work**: Google deprecated CardDAV access for new OAuth apps in 2019. Even with a valid token, Google returns 403 on `.well-known/carddav`.
-
-**Implementation plan**:
-- Use the [Google People API](https://developers.google.com/people/v1/contacts) (REST, not CardDAV)
-- Reuse `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, add scope `https://www.googleapis.com/auth/contacts`
-- Map vCard fields → People API `Person` resource; store vCard `UID` in `Person.externalIds` for idempotent updates
-- Cache `UID → resourceName` in a local SQLite file to handle Google's UID overwrite behavior
-
-### ⚠️ Birthday date format — critical warning
-
-vCard `BDAY` fields can arrive in three formats:
-
-| Format | Example | Notes |
-|---|---|---|
-| `BDAY:19900115` | yyyymmdd compact | Most common |
-| `BDAY:--0115` | day/month only, no year | vCard 3.0 standard |
-| `BDAY:1990-01-15` | ISO 8601 with dashes | Less common |
-
-**Risk**: some apps confuse DD/MM vs MM/DD, producing swapped birthdays. The `carddav-gcontacts` service will include an automatic diagnostic that logs a `WARNING` for every ambiguous date and always normalizes output to the People API format `{year, month, day}`.
