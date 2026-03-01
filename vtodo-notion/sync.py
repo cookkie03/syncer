@@ -481,3 +481,311 @@ def next_occurrence_after(rrule_str: str, from_due: str | None) -> str | None:
     except Exception as e:
         log.warning("[RRULE] next_occurrence_after failed (rrule=%r, from=%r): %s", rrule_str, from_due, e)
     return None
+
+
+# ── Reconciler ────────────────────────────────────────────────────────────
+
+def _parse_ts(ts: str | None) -> datetime | None:
+    """Parse ISO timestamp to naive UTC datetime for comparison."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
+
+
+def _caldav_wins(caldav_task: TaskData, notion_task: TaskData) -> bool:
+    """Returns True if CalDAV has a more recent modification than Notion."""
+    ct = _parse_ts(caldav_task.last_modified)
+    nt = _parse_ts(notion_task.last_modified)
+    if ct and nt:
+        return ct > nt
+    return True  # default: CalDAV wins when timestamps are ambiguous
+
+
+def _clone(task: TaskData, **overrides) -> TaskData:
+    """Return a copy of TaskData with optional field overrides."""
+    return TaskData(**{**{f: getattr(task, f) for f in task.__dataclass_fields__}, **overrides})
+
+
+def _handle_recurring_completed_caldav(task: TaskData) -> TaskData:
+    """A recurring task has STATUS:COMPLETED on CalDAV (Synology transitioning).
+    Return a copy reset to active — never show COMPLETED recurring in Notion."""
+    return _clone(task, status="In corso", is_completed=False)
+
+
+def _with_display_due(task: TaskData) -> TaskData:
+    """For recurring tasks: compute next future DUE for display in Notion.
+    CalDAV keeps the original base DUE; Notion should show the next occurrence."""
+    if not task.rrule or not task.due:
+        return task
+    future = next_future_occurrence(task.rrule, task.due)
+    if future:
+        return _clone(task, due=future)
+    return task
+
+
+def _handle_recurring_completed_notion(
+    notion_task: TaskData,
+    caldav_task: TaskData,
+    notion: Client,
+    database_id: str,
+    calendars: list,
+) -> bool:
+    """Handle a recurring task marked Done in Notion.
+    Advance DUE to next occurrence, reset checkbox, keep NEEDS-ACTION on CalDAV.
+    Returns True on success."""
+    uid = notion_task.uid
+
+    # Compute next DUE from RRULE (use CalDAV base DUE as reference)
+    base_due = caldav_task.due or notion_task.due
+    new_due = next_occurrence_after(notion_task.rrule or caldav_task.rrule, base_due)
+    if not new_due:
+        # Fallback: advance by 1 day if RRULE exhausted
+        try:
+            d = date.fromisoformat((base_due or "")[:10])
+            new_due = (d + timedelta(days=1)).isoformat()
+            log.warning("[RRULE] Exhausted for %s, advancing DUE by 1 day", uid[:30])
+        except Exception:
+            log.error("[RRULE] Cannot advance DUE for %s", uid[:30])
+            return False
+
+    log.info("[Sync] Recurring completed: advancing DUE %s -> %s for %s", base_due, new_due, uid[:30])
+
+    # Notion: reset to Not started, show computed future DUE
+    display_due = next_future_occurrence(notion_task.rrule or caldav_task.rrule, new_due) or new_due
+    ok_notion = write_notion(
+        notion, database_id,
+        _clone(notion_task, is_completed=False, status="In corso", due=display_due),
+        notion_task.notion_page_id,
+    )
+
+    # CalDAV: advance base DUE, keep NEEDS-ACTION (never write COMPLETED for recurring)
+    ok_caldav = write_caldav(
+        calendars,
+        _clone(caldav_task, due=new_due, is_completed=False, status="In corso"),
+    )
+
+    return ok_notion and ok_caldav
+
+
+def _handle_oneshot_completed_notion(
+    notion_task: TaskData,
+    caldav_task: TaskData,
+    notion: Client,
+    calendars: list,
+) -> bool:
+    """Handle a non-recurring task completed in Notion.
+    Write COMPLETED to CalDAV and archive the Notion page.
+    Returns True on success."""
+    uid = notion_task.uid
+
+    ok_caldav = write_caldav(calendars, _clone(caldav_task, is_completed=True, status="Completato"))
+
+    ok_notion = True
+    if notion_task.notion_page_id:
+        ok_notion = archive_notion(notion, notion_task.notion_page_id)
+        if ok_notion:
+            log.info("[Sync] One-shot completed and archived: %s '%s'", uid[:30], notion_task.summary[:30])
+
+    return ok_caldav and ok_notion
+
+
+def reconcile(
+    caldav_snap: dict[str, TaskData],
+    notion_snap: dict[str, TaskData],
+    state: SyncState,
+    notion: Client,
+    database_id: str,
+    calendars: list,
+) -> dict[str, int]:
+    """Core reconciliation loop.
+
+    Categorizes every UID into buckets and applies rules:
+    - Both sides: compare content hashes, resolve conflict by timestamp
+    - CalDAV-only: new task (create in Notion) or deleted from Notion (delete from CalDAV)
+    - Notion-only: new task (create in CalDAV) or deleted from CalDAV (archive in Notion)
+    - Vanished from both: cleanup state entry
+
+    First-run safety: if known_uids is empty, no deletions are propagated.
+    """
+    stats: dict[str, int] = {
+        "created_notion": 0, "created_caldav": 0,
+        "updated_notion": 0, "updated_caldav": 0,
+        "archived_notion": 0, "deleted_caldav": 0,
+        "recurring_advanced": 0, "skipped": 0, "errors": 0,
+    }
+    consecutive_errors = 0
+    new_known: dict[str, str] = {}
+    is_first_run = len(state.known_uids) == 0
+
+    if is_first_run:
+        log.info("[Reconcile] First run (empty state) — deletions disabled for safety")
+
+    all_uids = set(caldav_snap) | set(notion_snap) | set(state.known_uids)
+    log.info("[Reconcile] Processing %d unique UIDs", len(all_uids))
+
+    for uid in sorted(all_uids):
+        if consecutive_errors >= CIRCUIT_BREAKER_THRESHOLD:
+            log.error("[Reconcile] Circuit breaker: %d consecutive errors — stopping cycle", consecutive_errors)
+            notify("vtodo-notion: circuit breaker", f"{consecutive_errors} errori consecutivi. Controlla i log.")
+            break
+
+        in_caldav = uid in caldav_snap
+        in_notion = uid in notion_snap
+        was_known = uid in state.known_uids
+
+        try:
+            # ── BOTH SIDES ────────────────────────────────────────────────
+            if in_caldav and in_notion:
+                ct = caldav_snap[uid]
+                nt = notion_snap[uid]
+
+                # Recurring task COMPLETED on CalDAV: Synology is transitioning instances
+                if ct.is_completed and ct.rrule:
+                    ct = _handle_recurring_completed_caldav(ct)
+
+                # Recurring task completed on Notion → advance DUE
+                if nt.is_completed and nt.rrule:
+                    ok = _handle_recurring_completed_notion(nt, ct, notion, database_id, calendars)
+                    if ok:
+                        stats["recurring_advanced"] += 1
+                        consecutive_errors = 0
+                    else:
+                        stats["errors"] += 1
+                        consecutive_errors += 1
+                    new_known[uid] = state.known_uids.get(uid, ct.content_hash())
+                    continue
+
+                # Non-recurring task completed on Notion → COMPLETED on CalDAV + archive Notion
+                if nt.is_completed and not nt.rrule:
+                    ok = _handle_oneshot_completed_notion(nt, ct, notion, calendars)
+                    if ok:
+                        stats["archived_notion"] += 1
+                        consecutive_errors = 0
+                    else:
+                        stats["errors"] += 1
+                        consecutive_errors += 1
+                    continue  # task is done, don't add to new_known
+
+                # Non-recurring task COMPLETED on CalDAV → archive Notion
+                if ct.is_completed and not ct.rrule:
+                    if nt.notion_page_id and archive_notion(notion, nt.notion_page_id):
+                        log.info("[Sync] Archived completed one-shot (CalDAV→Notion): %s", uid[:30])
+                        stats["archived_notion"] += 1
+                        consecutive_errors = 0
+                    else:
+                        stats["errors"] += 1
+                        consecutive_errors += 1
+                    continue  # task is done
+
+                # Normal case: compute display version for comparison
+                caldav_display = _with_display_due(ct) if ct.rrule else ct
+
+                if caldav_display.content_hash() == nt.content_hash():
+                    stats["skipped"] += 1
+                    new_known[uid] = caldav_display.content_hash()
+                    continue
+
+                # Content differs: resolve by timestamp
+                if _caldav_wins(ct, nt):
+                    if write_notion(notion, database_id, caldav_display, nt.notion_page_id):
+                        log.info("[Sync] Updated Notion (CalDAV wins): %s", uid[:30])
+                        stats["updated_notion"] += 1
+                        consecutive_errors = 0
+                    else:
+                        stats["errors"] += 1
+                        consecutive_errors += 1
+                else:
+                    # Notion wins: write to CalDAV, restore base DUE for recurring
+                    task_to_write = _clone(nt, is_completed=False)
+                    if nt.rrule and ct.due:
+                        task_to_write = _clone(task_to_write, due=ct.due)
+                    if write_caldav(calendars, task_to_write):
+                        log.info("[Sync] Updated CalDAV (Notion wins): %s", uid[:30])
+                        stats["updated_caldav"] += 1
+                        consecutive_errors = 0
+                    else:
+                        stats["errors"] += 1
+                        consecutive_errors += 1
+
+                new_known[uid] = caldav_display.content_hash()
+
+            # ── CALDAV ONLY ───────────────────────────────────────────────
+            elif in_caldav and not in_notion:
+                ct = caldav_snap[uid]
+
+                if was_known and not is_first_run:
+                    # Was synced before, now gone from Notion → user deleted it from Notion
+                    if delete_caldav(calendars, uid):
+                        log.info("[Sync] Deleted from CalDAV (Notion deletion): %s", uid[:30])
+                        stats["deleted_caldav"] += 1
+                        consecutive_errors = 0
+                    else:
+                        stats["errors"] += 1
+                        consecutive_errors += 1
+                    continue  # don't add to new_known
+
+                # Skip completed non-recurring: don't create in Notion
+                if ct.is_completed and not ct.rrule:
+                    stats["skipped"] += 1
+                    continue
+
+                # Reset recurring COMPLETED to active before creating in Notion
+                if ct.is_completed and ct.rrule:
+                    ct = _handle_recurring_completed_caldav(ct)
+
+                task_to_write = _with_display_due(ct) if ct.rrule else ct
+                if write_notion(notion, database_id, task_to_write):
+                    log.info("[Sync] Created in Notion: %s '%s'", uid[:30], ct.summary[:30])
+                    stats["created_notion"] += 1
+                    consecutive_errors = 0
+                else:
+                    stats["errors"] += 1
+                    consecutive_errors += 1
+
+                new_known[uid] = task_to_write.content_hash()
+
+            # ── NOTION ONLY ───────────────────────────────────────────────
+            elif not in_caldav and in_notion:
+                nt = notion_snap[uid]
+
+                if was_known and not is_first_run:
+                    # Was synced before, now gone from CalDAV → user deleted it from CalDAV
+                    if nt.notion_page_id and archive_notion(notion, nt.notion_page_id):
+                        log.info("[Sync] Archived in Notion (CalDAV deletion): %s", uid[:30])
+                        stats["archived_notion"] += 1
+                        consecutive_errors = 0
+                    else:
+                        stats["errors"] += 1
+                        consecutive_errors += 1
+                    continue  # don't add to new_known
+
+                # New on Notion: create on CalDAV
+                if write_caldav(calendars, nt):
+                    log.info("[Sync] Created in CalDAV: %s '%s'", uid[:30], nt.summary[:30])
+                    stats["created_caldav"] += 1
+                    consecutive_errors = 0
+                else:
+                    stats["errors"] += 1
+                    consecutive_errors += 1
+
+                new_known[uid] = nt.content_hash()
+
+            # ── VANISHED FROM BOTH ────────────────────────────────────────
+            else:
+                log.debug("[Reconcile] UID %s vanished from both sides — cleaning state", uid[:30])
+                # Don't add to new_known: state entry removed
+
+        except Exception as e:
+            log.error("[Reconcile] Unexpected error for %s: %s", uid[:30], e)
+            stats["errors"] += 1
+            consecutive_errors += 1
+            # Preserve in new_known to avoid accidental deletion next cycle
+            if uid in state.known_uids:
+                new_known[uid] = state.known_uids[uid]
+
+    state.known_uids = new_known
+    log.info("[Reconcile] Done. known_uids updated to %d entries", len(new_known))
+    return stats
