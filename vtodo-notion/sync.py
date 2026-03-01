@@ -700,8 +700,10 @@ def reconcile(
                 else:
                     # Notion wins: write to CalDAV, restore base DUE for recurring
                     task_to_write = _clone(nt, is_completed=False)
-                    if nt.rrule and ct.due:
-                        task_to_write = _clone(task_to_write, due=ct.due)
+                    if nt.rrule:
+                        base_due = ct.due or nt.due
+                        if base_due:
+                            task_to_write = _clone(task_to_write, due=base_due)
                     if write_caldav(calendars, task_to_write):
                         log.info("[Sync] Updated CalDAV (Notion wins): %s", uid[:30])
                         stats["updated_caldav"] += 1
