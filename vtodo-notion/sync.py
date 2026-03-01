@@ -432,3 +432,52 @@ def archive_notion(notion: Client, page_id: str) -> bool:
     except Exception as e:
         log.error("[Notion] Archive failed for page %s: %s", page_id, e)
         return False
+
+
+# ── RRULE Engine ──────────────────────────────────────────────────────────
+
+def next_future_occurrence(rrule_str: str, base_due: str | None) -> str | None:
+    """Compute next RRULE occurrence >= today from base_due. Returns YYYY-MM-DD or None.
+
+    Synology CalDAV keeps the original base DUE on recurring VTODOs and never
+    advances it automatically. This function computes the correct next deadline
+    for display in Notion.
+    """
+    if not rrule_str or not base_due:
+        return None
+    try:
+        base = date.fromisoformat(base_due[:10])
+        today = date.today()
+        if base >= today:
+            return None  # already in the future, no adjustment needed
+
+        dtstart = datetime(base.year, base.month, base.day)
+        rule = rrulestr(rrule_str, dtstart=dtstart, ignoretz=True)
+        # Search from yesterday to correctly include today as a valid next occurrence
+        search_from = datetime(today.year, today.month, today.day) - timedelta(days=1)
+        nxt = rule.after(search_from)
+        if nxt:
+            return nxt.date().isoformat()
+    except Exception as e:
+        log.warning("[RRULE] next_future_occurrence failed (rrule=%r, base=%r): %s", rrule_str, base_due, e)
+    return None
+
+
+def next_occurrence_after(rrule_str: str, from_due: str | None) -> str | None:
+    """Compute the next RRULE occurrence strictly after from_due. Returns YYYY-MM-DD or None.
+
+    Used when completing a recurring task: advance DUE to the next occurrence
+    without writing STATUS:COMPLETED to CalDAV (which kills the series on Synology).
+    """
+    if not rrule_str:
+        return None
+    try:
+        from_date = date.fromisoformat(from_due[:10]) if from_due else date.today()
+        dtstart = datetime(from_date.year, from_date.month, from_date.day)
+        rule = rrulestr(rrule_str, dtstart=dtstart, ignoretz=True)
+        nxt = rule.after(dtstart)
+        if nxt:
+            return nxt.date().isoformat()
+    except Exception as e:
+        log.warning("[RRULE] next_occurrence_after failed (rrule=%r, from=%r): %s", rrule_str, from_due, e)
+    return None
