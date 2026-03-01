@@ -303,3 +303,132 @@ def delete_caldav(calendars: list, uid: str) -> bool:
             continue
     log.warning("[CalDAV] Could not find %s to delete", uid[:30])
     return False
+
+
+# ── Notion Layer ──────────────────────────────────────────────────────────
+
+def _get_rt(props: dict, key: str) -> str:
+    """Extract rich_text property value."""
+    p = props.get(key)
+    if p and p.get("rich_text"):
+        return p["rich_text"][0].get("text", {}).get("content", "")
+    return ""
+
+
+def _get_sel(props: dict, key: str, default: str = "") -> str:
+    """Extract select property value."""
+    p = props.get(key)
+    if p and p.get("select"):
+        return p["select"].get("name", default)
+    return default
+
+
+def parse_notion_page(page: dict) -> TaskData:
+    """Parse a Notion page dict into a TaskData."""
+    props = page.get("properties", {})
+
+    summary = ""
+    if props.get("Name") and props["Name"].get("title"):
+        summary = props["Name"]["title"][0].get("text", {}).get("content", "")
+
+    due = None
+    if props.get("Scadenza") and props["Scadenza"].get("date"):
+        raw_due = props["Scadenza"]["date"].get("start", "")
+        if raw_due:
+            due = raw_due[:10]  # YYYY-MM-DD only
+
+    is_completed = False
+    if props.get("Completato"):
+        is_completed = props["Completato"].get("status", {}).get("name", "") == "Done"
+
+    return TaskData(
+        uid=_get_rt(props, "UID CalDAV"),
+        summary=summary,
+        description=_get_rt(props, "Descrizione"),
+        due=due,
+        priority=_get_sel(props, "Priorità", "Nessuna"),
+        status="Completato" if is_completed else "In corso",
+        is_completed=is_completed,
+        location=_get_rt(props, "Luogo"),
+        url=(props.get("URL") or {}).get("url") or "",
+        rrule=_get_rt(props, "Periodicità"),
+        list_name=_get_sel(props, "Lista"),
+        last_modified=page.get("last_edited_time", ""),
+        notion_page_id=page["id"],
+    )
+
+
+def fetch_notion_snapshot(notion: Client, database_id: str) -> dict[str, TaskData]:
+    """Fetch all Notion pages. Returns dict[UID, TaskData]. Pages without UID skipped."""
+    snapshot: dict[str, TaskData] = {}
+    has_more = True
+    cursor = None
+
+    while has_more:
+        try:
+            params: dict[str, Any] = {"database_id": database_id}
+            if cursor:
+                params["start_cursor"] = cursor
+            resp = notion.databases.query(**params)
+            for page in resp.get("results", []):
+                task = parse_notion_page(page)
+                if task.uid:
+                    snapshot[task.uid] = task
+            has_more = resp.get("has_more", False)
+            cursor = resp.get("next_cursor")
+        except Exception as e:
+            log.error("[Notion] Fetch error: %s", e)
+            break
+
+    log.info("[Notion] Snapshot: %d pages with UIDs", len(snapshot))
+    return snapshot
+
+
+def build_notion_props(task: TaskData) -> dict:
+    """Build Notion page properties dict from TaskData."""
+    props: dict[str, Any] = {
+        "Name": {"title": [{"text": {"content": task.summary or "(senza titolo)"}}]},
+        "UID CalDAV": {"rich_text": [{"text": {"content": task.uid}}]},
+        "Completato": {"status": {"name": "Done" if task.is_completed else "Not started"}},
+    }
+
+    if task.description:
+        props["Descrizione"] = {"rich_text": [{"text": {"content": task.description[:1990]}}]}
+    if task.due:
+        props["Scadenza"] = {"date": {"start": task.due[:10]}}
+    if task.priority:
+        props["Priorità"] = {"select": {"name": task.priority}}
+    if task.location:
+        props["Luogo"] = {"rich_text": [{"text": {"content": task.location}}]}
+    if task.url:
+        props["URL"] = {"url": task.url}
+    if task.list_name:
+        props["Lista"] = {"select": {"name": task.list_name}}
+    if task.rrule:
+        props["Periodicità"] = {"rich_text": [{"text": {"content": task.rrule}}]}
+
+    return props
+
+
+def write_notion(notion: Client, database_id: str, task: TaskData, page_id: str | None = None) -> bool:
+    """Create or update a Notion page. Returns True on success."""
+    props = build_notion_props(task)
+    try:
+        if page_id:
+            notion.pages.update(page_id=page_id, properties=props)
+        else:
+            notion.pages.create(parent={"database_id": database_id}, properties=props)
+        return True
+    except Exception as e:
+        log.error("[Notion] Write failed for %s: %s", task.uid[:30], e)
+        return False
+
+
+def archive_notion(notion: Client, page_id: str) -> bool:
+    """Archive (soft-delete) a Notion page. Returns True on success."""
+    try:
+        notion.pages.update(page_id=page_id, archived=True)
+        return True
+    except Exception as e:
+        log.error("[Notion] Archive failed for page %s: %s", page_id, e)
+        return False
