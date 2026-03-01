@@ -791,3 +791,127 @@ def reconcile(
     state.known_uids = new_known
     log.info("[Reconcile] Done. known_uids updated to %d entries", len(new_known))
     return stats
+
+# ── Cleanup ───────────────────────────────────────────────────────────────
+
+def cleanup_completed_recurring(client: caldav.DAVClient, max_age_days: int = RECURRING_CLEANUP_DAYS) -> int:
+    """Delete completed instances of recurring VTODOs older than max_age_days.
+
+    Synology creates a COMPLETED copy for each finished occurrence of a recurring
+    task. These accumulate over time and confuse the sync. This routine auto-prunes
+    them after max_age_days to keep CalDAV clean.
+    """
+    deleted = 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+
+    try:
+        principal = client.principal()
+        calendars = principal.calendars()
+    except Exception as e:
+        log.error("[Cleanup] Cannot connect to CalDAV: %s", e)
+        return 0
+
+    for cal in calendars:
+        name = str(cal.name) if cal.name else "?"
+        try:
+            todos = cal.todos(include_completed=True)
+        except Exception:
+            continue
+
+        for todo in todos:
+            try:
+                vtodo = todo.vobject_instance.vtodo
+                status = str(vtodo.status.value).upper() if hasattr(vtodo, "status") else ""
+                has_rrule = hasattr(vtodo, "rrule")
+
+                if status != "COMPLETED" or not has_rrule:
+                    continue
+
+                # Get completed/last-modified timestamp
+                completed_dt = None
+                for attr in ("completed", "last_modified"):
+                    if hasattr(vtodo, attr):
+                        val = getattr(vtodo, attr).value
+                        if isinstance(val, (datetime, date)):
+                            completed_dt = val
+                            break
+
+                if completed_dt is None:
+                    continue
+
+                # Normalize to UTC-aware datetime
+                if isinstance(completed_dt, date) and not isinstance(completed_dt, datetime):
+                    completed_dt = datetime(completed_dt.year, completed_dt.month, completed_dt.day, tzinfo=timezone.utc)
+                elif hasattr(completed_dt, "tzinfo") and completed_dt.tzinfo is None:
+                    completed_dt = completed_dt.replace(tzinfo=timezone.utc)
+
+                if completed_dt < cutoff:
+                    todo.delete()
+                    deleted += 1
+            except Exception:
+                pass
+
+    if deleted:
+        log.info("[Cleanup] Deleted %d completed recurring VTODOs (older than %d days)", deleted, max_age_days)
+    return deleted
+
+
+# ── Main ──────────────────────────────────────────────────────────────────
+
+def sync() -> None:
+    log.info("=" * 60)
+    log.info("Starting sync CalDAV <-> Notion")
+    log.info("=" * 60)
+
+    state = load_state()
+
+    # Connect to both services
+    client = caldav.DAVClient(url=CALDAV_URL, username=CALDAV_USERNAME, password=CALDAV_PASSWORD)
+    notion = Client(auth=NOTION_TOKEN)
+    calendars = client.principal().calendars()
+
+    # Snapshot both sides simultaneously
+    caldav_snap = fetch_caldav_snapshot(client)
+    notion_snap = fetch_notion_snapshot(notion, NOTION_DATABASE_ID)
+
+    # Reconcile
+    stats = reconcile(caldav_snap, notion_snap, state, notion, NOTION_DATABASE_ID, calendars)
+
+    # Persist updated state
+    state.last_sync = datetime.now(timezone.utc).isoformat()
+    save_state(state)
+
+    # Auto-cleanup old completed recurring VTODOs
+    cleanup_completed_recurring(client)
+
+    # Summary log
+    log.info("-" * 60)
+    log.info(
+        "Sync complete | "
+        "created_notion=%d created_caldav=%d | "
+        "updated_notion=%d updated_caldav=%d | "
+        "archived_notion=%d deleted_caldav=%d | "
+        "recurring_advanced=%d skipped=%d errors=%d",
+        stats["created_notion"], stats["created_caldav"],
+        stats["updated_notion"], stats["updated_caldav"],
+        stats["archived_notion"], stats["deleted_caldav"],
+        stats["recurring_advanced"], stats["skipped"], stats["errors"],
+    )
+    log.info("=" * 60)
+
+    # Notify if error rate is high (>20%)
+    total_ops = sum(v for k, v in stats.items() if k != "skipped")
+    if stats["errors"] > 0 and total_ops > 0 and stats["errors"] / total_ops > 0.2:
+        notify(
+            "vtodo-notion: errori sync",
+            f"{stats['errors']} errori su {total_ops} operazioni. Controlla i log.",
+        )
+
+
+if __name__ == "__main__":
+    try:
+        sync()
+    except Exception as e:
+        log.error("Fatal: %s", e)
+        notify("vtodo-notion: errore fatale", f"Il sync si e' interrotto: {e}")
+        raise
