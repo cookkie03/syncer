@@ -35,6 +35,9 @@ GOOGLE_TOKEN = os.environ.get("GOOGLE_CONTACTS_TOKEN_FILE")
 CARDDAV_URL = os.environ.get("CARDDAV_URL", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 
+BACKUP_INTERVAL_MINUTES = int(os.environ.get("BACKUP_INTERVAL_MINUTES", "1440"))
+LAST_BACKUP_FILE = BACKUP_DIR / ".last_backup"
+
 SAFETY_DELETE_PCT = 0.20
 SAFETY_MIN_STATE = 50
 
@@ -42,6 +45,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("sync")
 
 NS = {"d": "DAV:", "c": "urn:ietf:params:xml:ns:carddav"}
+
+# ── TYPE MAPPING (vCard ↔ Google People API) ─────────────────────────────
+VCARD_TO_GOOGLE_TYPE = {
+    "HOME": "home", "WORK": "work", "CELL": "mobile", "MOBILE": "mobile",
+    "MAIN": "main", "FAX": "homeFax", "PAGER": "pager", "OTHER": "other",
+    "VOICE": "home", "INTERNET": "home",
+}
+GOOGLE_TO_VCARD_TYPE = {v: k for k, v in VCARD_TO_GOOGLE_TYPE.items()}
+GOOGLE_TO_VCARD_TYPE["mobile"] = "CELL"  # prefer CELL over MOBILE for vCard
+GOOGLE_TO_VCARD_TYPE["homeFax"] = "FAX"
 
 
 # ── FINGERPRINTING ────────────────────────────────────────────────────────
@@ -84,17 +97,27 @@ def fingerprint_from_google(person: dict) -> str:
 def parse_date(d_str):
     if not d_str:
         return None
+    # Truncate at T to handle vCard 4.0 datetime (e.g. "1990-01-15T00:00:00")
+    d_str = d_str.split("T")[0].strip()
     clean = re.sub(r"[^0-9-]", "", d_str)
     try:
         if clean.startswith("--"):
             m = re.search(r"--(\d{2})-?(\d{2})", clean)
-            return {"month": int(m.group(1)), "day": int(m.group(2))} if m else None
+            if m:
+                month, day = int(m.group(1)), int(m.group(2))
+                if 1 <= month <= 12 and 1 <= day <= 31:
+                    return {"month": month, "day": day}
+            return None
         if "-" in clean:
             parts = clean.split("-")
             if len(parts) >= 3:
-                return {"year": int(parts[0]), "month": int(parts[1]), "day": int(parts[2])}
+                year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+                if 1 <= month <= 12 and 1 <= day <= 31:
+                    return {"year": year, "month": month, "day": day}
         if len(clean) == 8:
-            return {"year": int(clean[:4]), "month": int(clean[4:6]), "day": int(clean[6:8])}
+            year, month, day = int(clean[:4]), int(clean[4:6]), int(clean[6:8])
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                return {"year": year, "month": month, "day": day}
     except Exception:
         pass
     return None
@@ -104,35 +127,75 @@ def google_to_vcard(person: dict, uid: str) -> str:
     v = vobject.vCard()
     v.add("uid").value = uid
 
-    names = person.get("names", [{}])[0]
+    names_list = person.get("names", [])
+    names = names_list[0] if names_list else {}
     display_name = names.get("displayName", "").strip() or "Senza Nome"
     v.add("fn").value = display_name
     v.add("n").value = vobject.vcard.Name(
         family=names.get("familyName", ""),
         given=names.get("givenName", ""),
+        additional=names.get("middleName", ""),
+        prefix=names.get("honorificPrefix", ""),
+        suffix=names.get("honorificSuffix", ""),
     )
 
     for e in person.get("emailAddresses", []):
         item = v.add("email")
         item.value = e["value"]
-        item.params["TYPE"] = [e.get("type", "home").upper()]
+        g_type = e.get("type", "home")
+        item.params["TYPE"] = [GOOGLE_TO_VCARD_TYPE.get(g_type, g_type.upper())]
 
     for ph in person.get("phoneNumbers", []):
         item = v.add("tel")
         item.value = ph["value"]
-        item.params["TYPE"] = [ph.get("type", "mobile").upper()]
+        g_type = ph.get("type", "mobile")
+        item.params["TYPE"] = [GOOGLE_TO_VCARD_TYPE.get(g_type, g_type.upper())]
 
     if person.get("birthdays"):
         d = person["birthdays"][0].get("date")
         if d:
-            yr = d.get("year", 0)
-            bday = f"{yr:04d}-{d.get('month', 0):02d}-{d.get('day', 0):02d}"
-            v.add("bday").value = bday.replace("0000-", "--")
+            month = d.get("month", 0)
+            day = d.get("day", 0)
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                yr = d.get("year") or 0
+                if yr:
+                    v.add("bday").value = f"{yr:04d}-{month:02d}-{day:02d}"
+                else:
+                    v.add("bday").value = f"--{month:02d}-{day:02d}"
 
-    for bio in person.get("biographies", []):
-        if bio.get("value"):
-            v.add("note").value = bio["value"]
-            break
+    note_parts = [bio["value"] for bio in person.get("biographies", []) if bio.get("value")]
+    if note_parts:
+        v.add("note").value = "\n".join(note_parts)
+
+    for addr in person.get("addresses", []):
+        item = v.add("adr")
+        item.value = vobject.vcard.Address(
+            street=addr.get("streetAddress", ""),
+            city=addr.get("city", ""),
+            region=addr.get("region", ""),
+            code=addr.get("postalCode", ""),
+            country=addr.get("country", ""),
+            extended=addr.get("extendedAddress", ""),
+            box=addr.get("poBox", ""),
+        )
+        g_type = addr.get("type", "home")
+        item.params["TYPE"] = [GOOGLE_TO_VCARD_TYPE.get(g_type, g_type.upper())]
+
+    orgs = person.get("organizations", [])
+    if orgs:
+        org = orgs[0]
+        if org.get("name"):
+            v.add("org").value = [org["name"]]
+        if org.get("title"):
+            v.add("title").value = org["title"]
+
+    for url in person.get("urls", []):
+        if url.get("value"):
+            v.add("url").value = url["value"]
+
+    nicks = person.get("nicknames", [])
+    if nicks and nicks[0].get("value"):
+        v.add("nickname").value = nicks[0]["value"]
 
     return v.serialize()
 
@@ -144,27 +207,113 @@ def vcard_to_google(vcard_str: str, uid: str) -> dict:
     display_name = fn.value.strip() if fn else "Senza Nome"
     n = getattr(v, "n", None)
 
+    name_entry = {
+        "displayName": display_name,
+        "familyName": n.value.family if n else "",
+        "givenName": n.value.given if n else "",
+    }
+    if n:
+        if getattr(n.value, "additional", ""):
+            name_entry["middleName"] = n.value.additional
+        if getattr(n.value, "prefix", ""):
+            name_entry["honorificPrefix"] = n.value.prefix
+        if getattr(n.value, "suffix", ""):
+            name_entry["honorificSuffix"] = n.value.suffix
+
     person = {
-        "names": [
-            {
-                "displayName": display_name,
-                "familyName": n.value.family if n else "",
-                "givenName": n.value.given if n else "",
-            }
-        ],
+        "names": [name_entry],
         "externalIds": [{"value": uid, "type": "vCard-UID"}],
     }
 
     if hasattr(v, "email_list"):
-        person["emailAddresses"] = [{"value": e.value, "type": "home"} for e in v.email_list]
+        emails = []
+        for e in v.email_list:
+            types = e.params.get("TYPE", [])
+            g_type = "other"
+            for t in types:
+                mapped = VCARD_TO_GOOGLE_TYPE.get(t.upper())
+                if mapped:
+                    g_type = mapped
+                    break
+            emails.append({"value": e.value, "type": g_type})
+        person["emailAddresses"] = emails
     if hasattr(v, "tel_list"):
-        person["phoneNumbers"] = [{"value": t.value, "type": "mobile"} for t in v.tel_list]
+        phones = []
+        for t in v.tel_list:
+            types = t.params.get("TYPE", [])
+            g_type = "other"
+            for tp in types:
+                mapped = VCARD_TO_GOOGLE_TYPE.get(tp.upper())
+                if mapped:
+                    g_type = mapped
+                    break
+            phones.append({"value": t.value, "type": g_type})
+        person["phoneNumbers"] = phones
     if hasattr(v, "bday"):
         dt = parse_date(v.bday.value)
         if dt:
             person["birthdays"] = [{"date": dt}]
-    if hasattr(v, "note"):
+    if hasattr(v, "note_list"):
+        parts = [n.value for n in v.note_list if n.value]
+        if parts:
+            person["biographies"] = [{"value": "\n".join(parts)}]
+    elif hasattr(v, "note"):
         person["biographies"] = [{"value": v.note.value}]
+
+    if hasattr(v, "adr_list"):
+        addrs = []
+        for a in v.adr_list:
+            addr = {}
+            val = a.value
+            if val.street:
+                addr["streetAddress"] = val.street
+            if val.city:
+                addr["city"] = val.city
+            if val.region:
+                addr["region"] = val.region
+            if val.code:
+                addr["postalCode"] = val.code
+            if val.country:
+                addr["country"] = val.country
+            if val.extended:
+                addr["extendedAddress"] = val.extended
+            if val.box:
+                addr["poBox"] = val.box
+            if addr:
+                types = a.params.get("TYPE", [])
+                g_type = "home"
+                for t in types:
+                    mapped = VCARD_TO_GOOGLE_TYPE.get(t.upper())
+                    if mapped:
+                        g_type = mapped
+                        break
+                addr["type"] = g_type
+                addrs.append(addr)
+        if addrs:
+            person["addresses"] = addrs
+
+    org_val = getattr(v, "org", None)
+    title_val = getattr(v, "title", None)
+    if org_val or title_val:
+        org_entry = {}
+        if org_val and org_val.value:
+            org_name = org_val.value[0] if isinstance(org_val.value, list) else org_val.value
+            if org_name:
+                org_entry["name"] = org_name
+        if title_val and title_val.value:
+            org_entry["title"] = title_val.value
+        if org_entry:
+            person["organizations"] = [org_entry]
+
+    if hasattr(v, "url_list"):
+        urls = [{"value": u.value} for u in v.url_list if u.value]
+        if urls:
+            person["urls"] = urls
+    elif hasattr(v, "url") and v.url.value:
+        person["urls"] = [{"value": v.url.value}]
+
+    if hasattr(v, "nickname") and v.nickname.value:
+        person["nicknames"] = [{"value": v.nickname.value}]
 
     return person
 
@@ -215,12 +364,12 @@ class CardDAVClient:
         """Returns {vcard_uid: {"href": str, "etag": str, "vcard": str}}."""
         xml_body = (
             '<?xml version="1.0" encoding="utf-8"?>'
-            '<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">'
-            "<D:prop><D:getetag/><C:address-data/></D:prop>"
-            "</D:propfind>"
+            '<C:addressbook-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">'
+            '<D:prop><D:getetag/><C:address-data/></D:prop>'
+            '</C:addressbook-query>'
         )
         res = self.session.request(
-            "PROPFIND",
+            "REPORT",
             self.addressbook_url,
             headers={"Depth": "1", "Content-Type": "application/xml"},
             data=xml_body,
@@ -247,11 +396,11 @@ class CardDAVClient:
             if not vcard_str:
                 continue
 
-            uid_match = re.search(r"^UID:(.*?)$", vcard_str, re.MULTILINE | re.IGNORECASE)
-            if not uid_match:
+            try:
+                parsed = vobject.readOne(vcard_str)
+                uid = parsed.uid.value.strip()
+            except Exception:
                 continue
-
-            uid = uid_match.group(1).strip()
             full_url = urljoin(self.addressbook_url, href)
             contacts[uid] = {
                 "href": full_url,
@@ -281,8 +430,8 @@ class CardDAVClient:
 
 # ── GOOGLE CLIENT ─────────────────────────────────────────────────────────
 class GoogleClient:
-    PERSON_FIELDS = "names,emailAddresses,phoneNumbers,birthdays,externalIds,biographies,metadata"
-    UPDATE_FIELDS = "names,emailAddresses,phoneNumbers,externalIds,birthdays,biographies"
+    PERSON_FIELDS = "names,emailAddresses,phoneNumbers,birthdays,externalIds,biographies,metadata,addresses,organizations,urls,nicknames"
+    UPDATE_FIELDS = "names,emailAddresses,phoneNumbers,externalIds,birthdays,biographies,addresses,organizations,urls,nicknames"
 
     def __init__(self):
         creds = Credentials.from_authorized_user_file(
@@ -326,11 +475,13 @@ class GoogleClient:
         return contacts
 
     def create(self, body: dict) -> dict:
-        return self.service.people().createContact(body=body).execute()
+        res = self.service.people().createContact(body=body).execute()
+        time.sleep(0.5)
+        return res
 
     def update(self, resource_name: str, person_etag: str, body: dict) -> dict:
         body["etag"] = person_etag
-        return (
+        res = (
             self.service.people()
             .updateContact(
                 resourceName=resource_name,
@@ -339,9 +490,12 @@ class GoogleClient:
             )
             .execute()
         )
+        time.sleep(0.5)
+        return res
 
     def delete(self, resource_name: str):
         self.service.people().deleteContact(resourceName=resource_name).execute()
+        time.sleep(0.5)
 
 
 # ── STATE DATABASE ────────────────────────────────────────────────────────
@@ -395,15 +549,36 @@ def load_state(db: sqlite3.Connection) -> dict:
 
 
 # ── BACKUP ────────────────────────────────────────────────────────────────
-def backup_carddav(contacts: dict):
-    """Save all vCards to BACKUP_DIR before modifying anything."""
+def should_backup() -> bool:
+    if not LAST_BACKUP_FILE.exists():
+        return True
+    try:
+        last_ts = float(LAST_BACKUP_FILE.read_text().strip())
+        return (time.time() - last_ts) >= (BACKUP_INTERVAL_MINUTES * 60)
+    except Exception:
+        return True
+
+
+def mark_backup_done():
+    LAST_BACKUP_FILE.write_text(str(time.time()))
+
+
+def backup_to_vcf(contacts: dict, prefix: str):
+    """Save all contacts to a single VCF file in BACKUP_DIR."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    bdir = BACKUP_DIR / ts
-    bdir.mkdir(parents=True, exist_ok=True)
-    for uid, data in contacts.items():
-        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", uid)[:80]
-        (bdir / f"{safe_name}.vcf").write_text(data["vcard"], encoding="utf-8")
-    log.info(f"Backed up {len(contacts)} vCards to {bdir}")
+    filename = f"backup_{prefix}_{ts}.vcf"
+    path = BACKUP_DIR / filename
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for uid, data in contacts.items():
+            # If it's from CardDAV it's already a dict with "vcard"
+            # If it's from Google, we convert it to vCard string
+            vcard = data["vcard"] if isinstance(data, dict) and "vcard" in data else google_to_vcard(data, uid)
+            f.write(vcard.strip() + "\n")
+    # Also save latest copy for ease of access
+    latest = BACKUP_DIR / f"latest_{prefix}.vcf"
+    shutil.copy2(path, latest)
+    log.info(f"Backed up {len(contacts)} {prefix} contacts to {path}")
 
 
 # ── SYNC ENGINE ───────────────────────────────────────────────────────────
@@ -422,9 +597,13 @@ def sync():
     c_contacts = carddav.get_all_contacts()
     log.info(f"Fetched {len(g_contacts)} Google, {len(c_contacts)} CardDAV contacts")
 
-    # Backup CardDAV before making changes
-    if c_contacts:
-        backup_carddav(c_contacts)
+    # Backup before making changes
+    if should_backup():
+        if c_contacts:
+            backup_to_vcf(c_contacts, "carddav")
+        if g_contacts:
+            backup_to_vcf(g_contacts, "google")
+        mark_backup_done()
 
     # 2. Build fingerprint indexes for unlinked contacts
     # Google contacts keyed by resourceName (no vCard-UID) need fingerprint matching
@@ -472,10 +651,11 @@ def sync():
             else:
                 new_g_etag = g_person.get("etag", "")
 
-            db.execute(
-                "INSERT OR REPLACE INTO contacts (uid, google_res, carddav_href, etag_google, etag_carddav, fingerprint) VALUES (?,?,?,?,?,?)",
-                (c_uid, g_res, c_data["href"], new_g_etag, c_data["etag"], fingerprint_from_vcard(c_data["vcard"])),
-            )
+            if not DRY_RUN:
+                db.execute(
+                    "INSERT OR REPLACE INTO contacts (uid, google_res, carddav_href, etag_google, etag_carddav, fingerprint) VALUES (?,?,?,?,?,?)",
+                    (c_uid, g_res, c_data["href"], new_g_etag, c_data["etag"], fingerprint_from_vcard(c_data["vcard"])),
+                )
             # Remove from unlinked sets
             c_unlinked_uids.discard(c_uid)
             g_unlinked.pop(g_res, None)
@@ -494,9 +674,34 @@ def sync():
     # Map them temporarily by resourceName
     g_res_to_person = {p["resourceName"]: p for p in g_unlinked.values()}
 
-    # Safety check for mass deletes
+    # ── SAFETY CHECKS ──────────────────────────────────────────────────
+    # 1. Per-side emptiness check: if state knows N contacts on a side
+    #    but that side now returns drastically fewer, something is wrong
+    #    (e.g. API failure, auth issue, server bug).
+    if len(state) >= SAFETY_MIN_STATE:
+        # Count how many state UIDs should exist on each side
+        state_on_carddav = sum(1 for s in state.values() if s.get("carddav_href"))
+        state_on_google = sum(1 for s in state.values() if s.get("google_res"))
+
+        if state_on_carddav >= SAFETY_MIN_STATE and len(c_contacts) < state_on_carddav * 0.30:
+            log.error(
+                f"SAFETY ABORT: CardDAV returned {len(c_contacts)} contacts but state expects ~{state_on_carddav}. "
+                "Possible API/auth failure — refusing to sync to prevent mass deletions."
+            )
+            db.close()
+            return
+
+        if state_on_google >= SAFETY_MIN_STATE and len(g_linked) < state_on_google * 0.30:
+            log.error(
+                f"SAFETY ABORT: Google returned {len(g_linked)} linked contacts but state expects ~{state_on_google}. "
+                "Possible API/auth failure — refusing to sync to prevent mass deletions."
+            )
+            db.close()
+            return
+
+    # 2. Total deletion check: if more than 20% of known contacts would be deleted
     state_uids_gone = [u for u in state if u not in g_linked and u not in c_contacts]
-    if len(state) > SAFETY_MIN_STATE and len(state_uids_gone) > len(state) * SAFETY_DELETE_PCT:
+    if len(state) >= SAFETY_MIN_STATE and len(state_uids_gone) > len(state) * SAFETY_DELETE_PCT:
         log.error(
             f"SAFETY ABORT: {len(state_uids_gone)}/{len(state)} contacts would be deleted. "
             "Check API connectivity."
