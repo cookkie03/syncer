@@ -518,6 +518,32 @@ def next_occurrence_after(rrule_str: str, from_due: str | None) -> str | None:
     return None
 
 
+DAY_ABBR = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+
+
+def _adjust_rrule_to_due(rrule_str: str, new_due: str) -> str:
+    """Update RRULE day/month-day components to match a new DUE date.
+    E.g. FREQ=WEEKLY;BYDAY=MO + DUE=Wednesday → FREQ=WEEKLY;BYDAY=WE"""
+    if not rrule_str or not new_due:
+        return rrule_str
+    try:
+        d = date.fromisoformat(new_due[:10])
+    except (ValueError, TypeError):
+        return rrule_str
+
+    parts = rrule_str.split(";")
+    new_parts = []
+    for part in parts:
+        key, _, val = part.partition("=")
+        if key == "BYDAY" and "FREQ=WEEKLY" in rrule_str:
+            new_parts.append(f"BYDAY={DAY_ABBR[d.weekday()]}")
+        elif key == "BYMONTHDAY" and "FREQ=MONTHLY" in rrule_str:
+            new_parts.append(f"BYMONTHDAY={d.day}")
+        else:
+            new_parts.append(part)
+    return ";".join(new_parts)
+
+
 # ── Reconciler ────────────────────────────────────────────────────────────
 
 def _parse_ts(ts: str | None) -> datetime | None:
@@ -725,6 +751,13 @@ def reconcile(
 
                 # Content differs: resolve by timestamp
                 if _caldav_wins(ct, nt):
+                    # If DUE changed on a recurring task, adjust RRULE on CalDAV too
+                    if ct.rrule and ct.due:
+                        adjusted_rrule = _adjust_rrule_to_due(ct.rrule, ct.due)
+                        if adjusted_rrule != ct.rrule:
+                            log.info("[Sync] Adjusting RRULE for %s: %s → %s", uid[:30], ct.rrule, adjusted_rrule)
+                            write_caldav(calendars, _clone(ct, rrule=adjusted_rrule))
+                            caldav_display = _clone(caldav_display, rrule=adjusted_rrule)
                     if write_notion(notion, database_id, caldav_display, nt.notion_page_id):
                         log.info("[Sync] Updated Notion (CalDAV wins): %s", uid[:30])
                         stats["updated_notion"] += 1
@@ -733,12 +766,11 @@ def reconcile(
                         stats["errors"] += 1
                         consecutive_errors += 1
                 else:
-                    # Notion wins: write to CalDAV, restore base DUE for recurring
+                    # Notion wins: write to CalDAV, adjust RRULE if DUE changed
                     task_to_write = _clone(nt, is_completed=False)
-                    if nt.rrule:
-                        base_due = ct.due or nt.due
-                        if base_due:
-                            task_to_write = _clone(task_to_write, due=base_due)
+                    if nt.rrule and nt.due:
+                        adjusted_rrule = _adjust_rrule_to_due(nt.rrule, nt.due)
+                        task_to_write = _clone(task_to_write, rrule=adjusted_rrule)
                     if write_caldav(calendars, task_to_write):
                         log.info("[Sync] Updated CalDAV (Notion wins): %s", uid[:30])
                         stats["updated_caldav"] += 1
