@@ -197,6 +197,16 @@ def parse_vtodo(vtodo_comp, list_name: str) -> TaskData:
     )
 
 
+def _pick_best(a: TaskData, b: TaskData) -> TaskData:
+    """Pick the best instance when two share the same UID.
+    Priority: active > completed, then last_modified, then due furthest in future."""
+    if a.is_completed != b.is_completed:
+        return b if a.is_completed else a
+    if a.last_modified != b.last_modified:
+        return b if (b.last_modified or "") > (a.last_modified or "") else a
+    return b if (b.due or "") > (a.due or "") else a
+
+
 def fetch_caldav_snapshot(client: caldav.DAVClient) -> dict[str, TaskData]:
     """Fetch all VTODOs from CalDAV, deduplicate by UID (prefer active over completed)."""
     snapshot: dict[str, TaskData] = {}
@@ -223,13 +233,13 @@ def fetch_caldav_snapshot(client: caldav.DAVClient) -> dict[str, TaskData]:
                 if not task.uid:
                     continue
 
-                # Dedup: prefer active (NEEDS-ACTION) over completed instances
+                # Dedup: pick best instance per UID
                 existing = snapshot.get(task.uid)
                 if existing:
-                    if existing.is_completed and not task.is_completed:
-                        log.info("[CalDAV] Duplicate UID %s: prefer active from '%s'", task.uid[:30], name)
-                        snapshot[task.uid] = task
-                    # else: keep existing (either both active, or existing is already active)
+                    winner = _pick_best(existing, task)
+                    if winner is not existing:
+                        log.info("[CalDAV] Duplicate UID %s: replacing with better instance from '%s'", task.uid[:30], name)
+                    snapshot[task.uid] = winner
                 else:
                     snapshot[task.uid] = task
             except Exception as e:
@@ -387,7 +397,18 @@ def fetch_notion_snapshot(notion: Client, database_id: str) -> dict[str, TaskDat
                     except Exception as e:
                         log.error("[Notion] Failed to assign UID to '%s': %s", task.summary[:30], e)
                         continue
-                snapshot[task.uid] = task
+                # Dedup: if UID already seen, keep best and archive loser
+                existing = snapshot.get(task.uid)
+                if existing:
+                    winner = _pick_best(existing, task)
+                    loser = task if winner is existing else existing
+                    if loser.notion_page_id:
+                        log.info("[Notion] Duplicate UID %s: archiving '%s' (page %s)",
+                                 task.uid[:30], loser.summary[:30], loser.notion_page_id[:8])
+                        archive_notion(notion, loser.notion_page_id)
+                    snapshot[task.uid] = winner
+                else:
+                    snapshot[task.uid] = task
             has_more = resp.get("has_more", False)
             cursor = resp.get("next_cursor")
         except Exception as e:
