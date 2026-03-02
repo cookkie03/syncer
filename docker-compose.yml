@@ -82,7 +82,7 @@ services:
       - ./caldav-backup/backup:/backup
     environment:
       - CALDAV_BACKUP_DIR=/backup
-    command: ["--watch", "--interval", "3600"]
+    command: ["--watch", "--interval", "14400"]
     healthcheck:
       test: ["CMD", "python", "-c", "import caldav; print('ok')"]
       interval: 5m
@@ -113,7 +113,8 @@ services:
       - DB_FILE=/data/sync_contacts.db
       - BACKUP_DIR=/data/backup
       - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google_contacts.json
-      - SYNC_INTERVAL=30
+      - SYNC_INTERVAL=1440
+      - BACKUP_INTERVAL_MINUTES=1440
     healthcheck:
       test: ["CMD", "python3", "-c", "import googleapiclient, vobject, caldav; print('ok')"]
       interval: 5m
