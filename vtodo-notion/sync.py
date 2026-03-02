@@ -15,6 +15,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import uuid
+
 import caldav
 import requests
 import vobject
@@ -359,7 +361,7 @@ def parse_notion_page(page: dict) -> TaskData:
 
 
 def fetch_notion_snapshot(notion: Client, database_id: str) -> dict[str, TaskData]:
-    """Fetch all Notion pages. Returns dict[UID, TaskData]. Pages without UID skipped."""
+    """Fetch all active Notion pages. Assigns a UID to pages missing one."""
     snapshot: dict[str, TaskData] = {}
     has_more = True
     cursor = None
@@ -372,15 +374,27 @@ def fetch_notion_snapshot(notion: Client, database_id: str) -> dict[str, TaskDat
             resp = notion.databases.query(**params)
             for page in resp.get("results", []):
                 task = parse_notion_page(page)
-                if task.uid:
-                    snapshot[task.uid] = task
+                if not task.uid:
+                    # New page created manually in Notion — assign a UUID
+                    new_uid = str(uuid.uuid4()).upper()
+                    try:
+                        notion.pages.update(
+                            page_id=page["id"],
+                            properties={"UID CalDAV": {"rich_text": [{"text": {"content": new_uid}}]}},
+                        )
+                        task.uid = new_uid
+                        log.info("[Notion] Assigned UID %s to page '%s'", new_uid[:8], task.summary[:30])
+                    except Exception as e:
+                        log.error("[Notion] Failed to assign UID to '%s': %s", task.summary[:30], e)
+                        continue
+                snapshot[task.uid] = task
             has_more = resp.get("has_more", False)
             cursor = resp.get("next_cursor")
         except Exception as e:
             log.error("[Notion] Fetch error: %s", e)
             break
 
-    log.info("[Notion] Snapshot: %d pages with UIDs", len(snapshot))
+    log.info("[Notion] Snapshot: %d pages", len(snapshot))
     return snapshot
 
 
