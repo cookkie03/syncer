@@ -879,10 +879,19 @@ def sync() -> None:
 
     state = load_state()
 
-    # Connect to both services
-    client = caldav.DAVClient(url=CALDAV_URL, username=CALDAV_USERNAME, password=CALDAV_PASSWORD)
+    # Connect to both services (with retry on network errors)
+    client = caldav.DAVClient(url=CALDAV_URL, username=CALDAV_USERNAME, password=CALDAV_PASSWORD, timeout=60)
     notion = Client(auth=NOTION_TOKEN)
-    calendars = client.principal().calendars()
+    calendars = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            calendars = client.principal().calendars()
+            break
+        except Exception as e:
+            log.warning("[CalDAV] Connection attempt %d/%d failed: %s", attempt, MAX_RETRIES, e)
+            if attempt == MAX_RETRIES:
+                raise
+            time.sleep(5 * attempt)
 
     # Snapshot both sides simultaneously
     caldav_snap = fetch_caldav_snapshot(client)
