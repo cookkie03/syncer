@@ -913,9 +913,23 @@ def sync() -> None:
     )
     log.info("=" * 60)
 
-    # Notify if error rate is high (>20%)
+    # Notify on changes or errors
     total_ops = sum(v for k, v in stats.items() if k != "skipped")
-    if stats["errors"] > 0 and total_ops > 0 and stats["errors"] / total_ops > 0.2:
+    changes = total_ops - stats["errors"]
+    if changes > 0:
+        lines = []
+        for key, emoji in [
+            ("created_notion", "📥"), ("created_caldav", "📤"),
+            ("updated_notion", "✏️"), ("updated_caldav", "✏️"),
+            ("archived_notion", "🗃"), ("deleted_caldav", "🗑"),
+            ("recurring_advanced", "🔄"),
+        ]:
+            if stats[key]:
+                lines.append(f"{emoji} {key.replace('_', ' ')}: {stats[key]}")
+        if stats["errors"]:
+            lines.append(f"⚠️ errori: {stats['errors']}")
+        notify("vtodo-notion sync", "\n".join(lines))
+    elif stats["errors"] > 0:
         notify(
             "vtodo-notion: errori sync",
             f"{stats['errors']} errori su {total_ops} operazioni. Controlla i log.",
