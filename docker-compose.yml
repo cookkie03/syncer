@@ -44,6 +44,7 @@ services:
       - ./vtodo-notion/state:/data
     environment:
       - LOG_DIR=/data/logs
+      - SYNC_INTERVAL_MINUTES=5
     healthcheck:
       test: ["CMD", "python", "-c", "import caldav, notion_client; print('ok')"]
       interval: 5m
