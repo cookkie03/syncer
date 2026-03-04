@@ -23,7 +23,8 @@ RUN pip install --no-cache-dir \
     python-dateutil \
     google-api-python-client \
     google-auth-httplib2 \
-    google-auth-oauthlib
+    google-auth-oauthlib \
+    pyyaml
 
 WORKDIR /app
 COPY sync.py /app/sync.py

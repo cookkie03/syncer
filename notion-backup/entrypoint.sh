@@ -3,7 +3,7 @@ set -e
 
 CRONTAB_FILE="/tmp/notion-backup.cron"
 
-: "${NOTION_API_TOKEN:?NOTION_API_TOKEN is required}"
+: "${NOTION_TOKEN:?NOTION_TOKEN is required}"
 
 # Default: daily at 02:00 UTC. Override with BACKUP_SCHEDULE (cron syntax).
 BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-0 2 * * *}"

@@ -15,14 +15,13 @@ RUN case "${TARGETARCH}" in \
       -o /usr/local/bin/supercronic && \
     chmod +x /usr/local/bin/supercronic
 
-RUN pip install --no-cache-dir requests
+RUN pip install --no-cache-dir requests pyyaml
 
 WORKDIR /app
 COPY backup.py /app/backup.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-RUN mkdir -p /backup/json /backup/html/latest /backup/html/archives \
-             /backup/snapshots/daily /backup/snapshots/weekly
+RUN mkdir -p /backup/json /backup/snapshots/daily /backup/snapshots/weekly
 
 ENTRYPOINT ["/app/entrypoint.sh"]

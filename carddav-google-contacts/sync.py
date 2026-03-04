@@ -29,17 +29,24 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 # ── CONFIGURATION ─────────────────────────────────────────────────────────
-DB_FILE = os.environ.get("DB_FILE", "/data/sync_contacts.db")
-BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "/data/backup"))
+for _p in ["/shared", str(Path(__file__).resolve().parent.parent / "shared")]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+from config_loader import cfg, env  # noqa: E402
+
+DB_FILE = cfg("carddav_google_contacts.db_file", os.environ.get("DB_FILE", "/data/sync_contacts.db"))
+BACKUP_DIR = Path(cfg("carddav_google_contacts.backup_dir", os.environ.get("BACKUP_DIR", "/data/backup")))
 GOOGLE_TOKEN = os.environ.get("GOOGLE_CONTACTS_TOKEN_FILE")
 CARDDAV_URL = os.environ.get("CARDDAV_URL", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 
-BACKUP_INTERVAL_MINUTES = int(os.environ.get("BACKUP_INTERVAL_MINUTES", "1440"))
+BACKUP_INTERVAL_MINUTES = cfg("carddav_google_contacts.backup_interval_minutes", 1440, int)
 LAST_BACKUP_FILE = BACKUP_DIR / ".last_backup"
 
-SAFETY_DELETE_PCT = 0.20
-SAFETY_MIN_STATE = 50
+SAFETY_DELETE_PCT = cfg("carddav_google_contacts.safety_delete_pct", 0.20, float)
+SAFETY_MIN_STATE = cfg("carddav_google_contacts.safety_min_state", 50, int)
+SIDE_EMPTINESS_THRESHOLD = cfg("carddav_google_contacts.side_emptiness_threshold", 0.30, float)
+GOOGLE_API_DELAY = cfg("carddav_google_contacts.google_api_delay", 0.5, float)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("sync")
@@ -476,7 +483,7 @@ class GoogleClient:
 
     def create(self, body: dict) -> dict:
         res = self.service.people().createContact(body=body).execute()
-        time.sleep(0.5)
+        time.sleep(GOOGLE_API_DELAY)
         return res
 
     def update(self, resource_name: str, person_etag: str, body: dict) -> dict:
@@ -490,12 +497,12 @@ class GoogleClient:
             )
             .execute()
         )
-        time.sleep(0.5)
+        time.sleep(GOOGLE_API_DELAY)
         return res
 
     def delete(self, resource_name: str):
         self.service.people().deleteContact(resourceName=resource_name).execute()
-        time.sleep(0.5)
+        time.sleep(GOOGLE_API_DELAY)
 
 
 # ── STATE DATABASE ────────────────────────────────────────────────────────
@@ -683,7 +690,7 @@ def sync():
         state_on_carddav = sum(1 for s in state.values() if s.get("carddav_href"))
         state_on_google = sum(1 for s in state.values() if s.get("google_res"))
 
-        if state_on_carddav >= SAFETY_MIN_STATE and len(c_contacts) < state_on_carddav * 0.30:
+        if state_on_carddav >= SAFETY_MIN_STATE and len(c_contacts) < state_on_carddav * SIDE_EMPTINESS_THRESHOLD:
             log.error(
                 f"SAFETY ABORT: CardDAV returned {len(c_contacts)} contacts but state expects ~{state_on_carddav}. "
                 "Possible API/auth failure — refusing to sync to prevent mass deletions."
@@ -691,7 +698,7 @@ def sync():
             db.close()
             return
 
-        if state_on_google >= SAFETY_MIN_STATE and len(g_linked) < state_on_google * 0.30:
+        if state_on_google >= SAFETY_MIN_STATE and len(g_linked) < state_on_google * SIDE_EMPTINESS_THRESHOLD:
             log.error(
                 f"SAFETY ABORT: Google returned {len(g_linked)} linked contacts but state expects ~{state_on_google}. "
                 "Possible API/auth failure — refusing to sync to prevent mass deletions."

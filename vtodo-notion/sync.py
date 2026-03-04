@@ -9,11 +9,11 @@ import json
 import logging
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
-
-import uuid
 
 import caldav
 import requests
@@ -22,20 +22,41 @@ from dateutil.rrule import rrulestr
 from notion_client import Client
 from notion_client.errors import APIResponseError
 
-# ── Config (da config.py) ─────────────────────────────────────────────────
+# ── Config (da config.yaml via shared/config_loader) ─────────────────────
 
-from config import (  # noqa: E402
-    CALDAV_URL, CALDAV_USERNAME, CALDAV_PASSWORD,
-    NOTION_TOKEN, NOTION_DATABASE_ID,
-    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-    STATE_FILE, LOG_DIR, LOG_FILE,
-    MAX_RETRIES, CIRCUIT_BREAKER_THRESHOLD, RECURRING_CLEANUP_DAYS,
-    RETRY_BACKOFF_FACTOR, CALDAV_TIMEOUT, TELEGRAM_TIMEOUT,
-    DESCRIPTION_MAX_CHARS, HASH_LENGTH,
-    DEFAULT_TITLE, DEFAULT_PRIORITY, DEFAULT_STATUS, ICAL_PRODID,
-    LOG_LEVEL_FILE, LOG_LEVEL_STDOUT,
-    LOG_DATE_FORMAT_FILE, LOG_DATE_FORMAT_STDOUT,
-)
+for _p in ["/shared", str(Path(__file__).resolve().parent.parent / "shared")]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+from config_loader import cfg, require_env, env  # noqa: E402
+
+CALDAV_URL         = require_env("CALDAV_URL")
+CALDAV_USERNAME    = require_env("CALDAV_USERNAME")
+CALDAV_PASSWORD    = require_env("CALDAV_PASSWORD")
+NOTION_TOKEN       = require_env("NOTION_TOKEN")
+NOTION_DATABASE_ID = require_env("NOTION_DATABASE_ID")
+TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = env("TELEGRAM_CHAT_ID")
+
+STATE_FILE = Path(cfg("vtodo_notion.state_file", "/data/sync_state.json"))
+LOG_DIR    = Path(cfg("vtodo_notion.log_dir", "/data/logs"))
+LOG_FILE   = LOG_DIR / "sync.log"
+
+MAX_RETRIES               = cfg("vtodo_notion.max_retries", 3, int)
+CIRCUIT_BREAKER_THRESHOLD = cfg("vtodo_notion.circuit_breaker_threshold", 5, int)
+RETRY_BACKOFF_FACTOR      = cfg("vtodo_notion.retry_backoff_factor", 5, int)
+CALDAV_TIMEOUT            = cfg("vtodo_notion.caldav_timeout", 60, int)
+TELEGRAM_TIMEOUT          = cfg("shared.telegram_timeout", 10, int)
+RECURRING_CLEANUP_DAYS    = cfg("vtodo_notion.recurring_cleanup_days", 5, int)
+DESCRIPTION_MAX_CHARS     = cfg("vtodo_notion.description_max_chars", 1990, int)
+HASH_LENGTH               = cfg("vtodo_notion.hash_length", 16, int)
+LOG_LEVEL_FILE            = cfg("vtodo_notion.log_level_file", "DEBUG")
+LOG_LEVEL_STDOUT          = cfg("vtodo_notion.log_level_stdout", "INFO")
+LOG_DATE_FORMAT_FILE      = "%Y-%m-%dT%H:%M:%SZ"
+LOG_DATE_FORMAT_STDOUT    = "%H:%M:%S"
+DEFAULT_TITLE             = cfg("vtodo_notion.default_title", "(senza titolo)")
+DEFAULT_PRIORITY          = cfg("vtodo_notion.default_priority", "Nessuna")
+DEFAULT_STATUS            = cfg("vtodo_notion.default_status", "In corso")
+ICAL_PRODID               = cfg("vtodo_notion.ical_prodid", "-//vtodo-notion//EN")
 
 # ── Logging ───────────────────────────────────────────────────────────────
 
@@ -210,7 +231,7 @@ def fetch_caldav_snapshot(client: caldav.DAVClient) -> dict[str, TaskData]:
     log.info("[CalDAV] Found %d collections", len(calendars))
 
     for cal in calendars:
-        name = str(cal.name) if cal.name else "?"
+        name = str(cal.get_display_name()) if cal.get_display_name() else "?"
         try:
             todos = cal.todos(include_completed=True)
         except Exception as e:
@@ -276,7 +297,7 @@ def write_caldav(calendars: list, task: TaskData) -> bool:
     """Create or update a VTODO on CalDAV. Returns True on success."""
     target_cal = None
     for cal in calendars:
-        if (str(cal.name) if cal.name else "?") == task.list_name:
+        if (str(cal.get_display_name()) if cal.get_display_name() else "?") == task.list_name:
             target_cal = cal
             break
     if not target_cal:
@@ -304,7 +325,7 @@ def delete_caldav(calendars: list, uid: str) -> bool:
             results = cal.search(todo=True, uid=uid)
             for r in results:
                 r.delete()
-                log.info("[CalDAV] Deleted %s from '%s'", uid[:30], cal.name)
+                log.info("[CalDAV] Deleted %s from '%s'", uid[:30], cal.get_display_name())
                 return True
         except Exception:
             continue
@@ -887,7 +908,7 @@ def cleanup_completed_recurring(client: caldav.DAVClient, max_age_days: int = RE
         return 0
 
     for cal in calendars:
-        name = str(cal.name) if cal.name else "?"
+        name = str(cal.get_display_name()) if cal.get_display_name() else "?"
         try:
             todos = cal.todos(include_completed=True)
         except Exception:
