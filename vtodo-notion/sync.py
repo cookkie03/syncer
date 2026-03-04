@@ -7,12 +7,10 @@ Architecture: Snapshot & Reconcile.
 import hashlib
 import json
 import logging
-import os
 import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 import uuid
@@ -24,37 +22,34 @@ from dateutil.rrule import rrulestr
 from notion_client import Client
 from notion_client.errors import APIResponseError
 
-# ── Config ────────────────────────────────────────────────────────────────
+# ── Config (da config.py) ─────────────────────────────────────────────────
 
-CALDAV_URL = os.environ["CALDAV_URL"]
-CALDAV_USERNAME = os.environ["CALDAV_USERNAME"]
-CALDAV_PASSWORD = os.environ["CALDAV_PASSWORD"]
-NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-
-STATE_FILE = Path(os.environ.get("STATE_FILE", "/data/sync_state.json"))
-LOG_DIR = Path(os.environ.get("LOG_DIR", "/data/logs"))
-LOG_FILE = LOG_DIR / "sync.log"
-
-MAX_RETRIES = 3
-CIRCUIT_BREAKER_THRESHOLD = 5
-RECURRING_CLEANUP_DAYS = 10
+from config import (  # noqa: E402
+    CALDAV_URL, CALDAV_USERNAME, CALDAV_PASSWORD,
+    NOTION_TOKEN, NOTION_DATABASE_ID,
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+    STATE_FILE, LOG_DIR, LOG_FILE,
+    MAX_RETRIES, CIRCUIT_BREAKER_THRESHOLD, RECURRING_CLEANUP_DAYS,
+    RETRY_BACKOFF_FACTOR, CALDAV_TIMEOUT, TELEGRAM_TIMEOUT,
+    DESCRIPTION_MAX_CHARS, HASH_LENGTH,
+    DEFAULT_TITLE, DEFAULT_PRIORITY, DEFAULT_STATUS, ICAL_PRODID,
+    LOG_LEVEL_FILE, LOG_LEVEL_STDOUT,
+    LOG_DATE_FORMAT_FILE, LOG_DATE_FORMAT_STDOUT,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-file_handler.setLevel(logging.DEBUG)
+file_handler.setLevel(getattr(logging, LOG_LEVEL_FILE, logging.DEBUG))
 file_handler.setFormatter(logging.Formatter(
-    "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ"))
+    "%(asctime)s [%(levelname)s] %(message)s", datefmt=LOG_DATE_FORMAT_FILE))
 
 stdout_handler = logging.StreamHandler(sys.stdout)
-stdout_handler.setLevel(logging.INFO)
+stdout_handler.setLevel(getattr(logging, LOG_LEVEL_STDOUT, logging.INFO))
 stdout_handler.setFormatter(logging.Formatter(
-    "%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
+    "%(asctime)s [%(levelname)s] %(message)s", datefmt=LOG_DATE_FORMAT_STDOUT))
 
 log = logging.getLogger("sync")
 log.setLevel(logging.DEBUG)
@@ -70,8 +65,8 @@ class TaskData:
     summary: str = ""
     description: str = ""
     due: str | None = None          # YYYY-MM-DD
-    priority: str = "Nessuna"       # Alta/Media/Bassa/Nessuna
-    status: str = "In corso"        # In corso/Completato
+    priority: str = DEFAULT_PRIORITY   # Alta/Media/Bassa/Nessuna
+    status: str = DEFAULT_STATUS      # In corso/Completato
     is_completed: bool = False
     location: str = ""
     url: str = ""
@@ -84,7 +79,7 @@ class TaskData:
         """Hash of semantic fields only (no timestamps, no page IDs)."""
         fields = (
             self.summary.strip(),
-            self.description.strip()[:1990],
+            self.description.strip()[:DESCRIPTION_MAX_CHARS],
             (self.due or "")[:10],
             self.priority,
             str(self.is_completed),
@@ -93,7 +88,7 @@ class TaskData:
             self.rrule.strip(),
             self.list_name.strip(),
         )
-        return hashlib.sha256("|".join(fields).encode()).hexdigest()[:16]
+        return hashlib.sha256("|".join(fields).encode()).hexdigest()[:HASH_LENGTH]
 
 
 @dataclass
@@ -133,7 +128,7 @@ def notify(title: str, message: str) -> None:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": f"*{title}*\n{message}", "parse_mode": "Markdown"},
-            timeout=10,
+            timeout=TELEGRAM_TIMEOUT,
         )
     except Exception as e:
         log.warning("[Telegram] Failed to send: %s", e)
@@ -251,14 +246,14 @@ def fetch_caldav_snapshot(client: caldav.DAVClient) -> dict[str, TaskData]:
 
 def build_ical(task: TaskData) -> str:
     """Build iCalendar VTODO string from TaskData."""
-    summary = _ical_escape(task.summary or "(senza titolo)")
+    summary = _ical_escape(task.summary or DEFAULT_TITLE)
     desc = _ical_escape(task.description or "")
     priority = PRIORITY_REVERSE.get(task.priority, "0")
     status = "COMPLETED" if task.is_completed else "NEEDS-ACTION"
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     lines = [
-        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//vtodo-notion//EN",
+        "BEGIN:VCALENDAR", "VERSION:2.0", f"PRODID:{ICAL_PRODID}",
         "BEGIN:VTODO",
         f"UID:{task.uid}", f"DTSTAMP:{now}", f"LAST-MODIFIED:{now}",
         f"SUMMARY:{summary}", f"STATUS:{status}", f"PRIORITY:{priority}",
@@ -420,28 +415,21 @@ def fetch_notion_snapshot(notion: Client, database_id: str) -> dict[str, TaskDat
 
 
 def build_notion_props(task: TaskData) -> dict:
-    """Build Notion page properties dict from TaskData."""
+    """Build Notion page properties dict from TaskData.
+    All optional fields are always written — null/empty clears the property in Notion."""
     props: dict[str, Any] = {
-        "Name": {"title": [{"text": {"content": task.summary or "(senza titolo)"}}]},
+        "Name": {"title": [{"text": {"content": task.summary or DEFAULT_TITLE}}]},
         "UID CalDAV": {"rich_text": [{"text": {"content": task.uid}}]},
         "Completato": {"status": {"name": "Done" if task.is_completed else "Not started"}},
+        # Optional fields: write value or null to clear
+        "Descrizione": {"rich_text": [{"text": {"content": task.description[:DESCRIPTION_MAX_CHARS]}}] if task.description else []},
+        "Scadenza": {"date": {"start": task.due[:10]}} if task.due else {"date": None},
+        "Priorità": {"select": {"name": task.priority}} if task.priority else {"select": None},
+        "Luogo": {"rich_text": [{"text": {"content": task.location}}] if task.location else []},
+        "URL": {"url": task.url} if task.url else {"url": None},
+        "Lista": {"select": {"name": task.list_name}} if task.list_name else {"select": None},
+        "Periodicità": {"rich_text": [{"text": {"content": task.rrule}}] if task.rrule else []},
     }
-
-    if task.description:
-        props["Descrizione"] = {"rich_text": [{"text": {"content": task.description[:1990]}}]}
-    if task.due:
-        props["Scadenza"] = {"date": {"start": task.due[:10]}}
-    if task.priority:
-        props["Priorità"] = {"select": {"name": task.priority}}
-    if task.location:
-        props["Luogo"] = {"rich_text": [{"text": {"content": task.location}}]}
-    if task.url:
-        props["URL"] = {"url": task.url}
-    if task.list_name:
-        props["Lista"] = {"select": {"name": task.list_name}}
-    if task.rrule:
-        props["Periodicità"] = {"rich_text": [{"text": {"content": task.rrule}}]}
-
     return props
 
 
@@ -744,13 +732,33 @@ def reconcile(
                 # Normal case: compute display version for comparison
                 caldav_display = _with_display_due(ct) if ct.rrule else ct
 
-                if caldav_display.content_hash() == nt.content_hash():
+                caldav_hash = caldav_display.content_hash()
+                notion_hash = nt.content_hash()
+
+                if caldav_hash == notion_hash:
                     stats["skipped"] += 1
-                    new_known[uid] = caldav_display.content_hash()
+                    new_known[uid] = caldav_hash
                     continue
 
-                # Content differs: resolve by timestamp
-                if _caldav_wins(ct, nt):
+                # Determine who changed relative to last known state.
+                # This avoids timestamp comparison pitfalls (e.g. Synology not
+                # updating LAST-MODIFIED when Apple Reminders edits a task).
+                known_hash = state.known_uids.get(uid)
+                caldav_changed = (caldav_hash != known_hash)
+                notion_changed = (notion_hash != known_hash)
+
+                if caldav_changed and not notion_changed:
+                    winner = "caldav"
+                    log.debug("[Sync] CalDAV changed (hash %s→%s), Notion unchanged", known_hash, caldav_hash)
+                elif notion_changed and not caldav_changed:
+                    winner = "notion"
+                    log.debug("[Sync] Notion changed (hash %s→%s), CalDAV unchanged", known_hash, notion_hash)
+                else:
+                    # Both changed (or first run without known hash): fall back to timestamps
+                    winner = "caldav" if _caldav_wins(ct, nt) else "notion"
+                    log.debug("[Sync] Conflict for %s — both changed, timestamp picks %s", uid[:30], winner)
+
+                if winner == "caldav":
                     # If DUE changed on a recurring task, adjust RRULE on CalDAV too
                     if ct.rrule and ct.due:
                         adjusted_rrule = _adjust_rrule_to_due(ct.rrule, ct.due)
@@ -779,7 +787,7 @@ def reconcile(
                         stats["errors"] += 1
                         consecutive_errors += 1
 
-                new_known[uid] = caldav_display.content_hash()
+                new_known[uid] = caldav_hash
 
             # ── CALDAV ONLY ───────────────────────────────────────────────
             elif in_caldav and not in_notion:
@@ -933,7 +941,7 @@ def sync() -> None:
     state = load_state()
 
     # Connect to both services (with retry on network errors)
-    client = caldav.DAVClient(url=CALDAV_URL, username=CALDAV_USERNAME, password=CALDAV_PASSWORD, timeout=60)
+    client = caldav.DAVClient(url=CALDAV_URL, username=CALDAV_USERNAME, password=CALDAV_PASSWORD, timeout=CALDAV_TIMEOUT)
     notion = Client(auth=NOTION_TOKEN)
     calendars = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -944,7 +952,7 @@ def sync() -> None:
             log.warning("[CalDAV] Connection attempt %d/%d failed: %s", attempt, MAX_RETRIES, e)
             if attempt == MAX_RETRIES:
                 raise
-            time.sleep(5 * attempt)
+            time.sleep(RETRY_BACKOFF_FACTOR * attempt)
 
     # Snapshot both sides simultaneously
     caldav_snap = fetch_caldav_snapshot(client)

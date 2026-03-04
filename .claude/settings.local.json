@@ -39,7 +39,9 @@
       "Bash(ping:*)",
       "Bash(docker:*)",
       "Bash(\"C:/Users/lucam/OneDrive/Github/syncer/vtodo-notion/sync.py\":*)",
-      "Bash(MSYS_NO_PATHCONV=1 docker exec:*)"
+      "Bash(MSYS_NO_PATHCONV=1 docker exec:*)",
+      "Bash(xargs grep:*)",
+      "Bash(MSYS_NO_PATHCONV=1 docker ps:*)"
     ]
   }
 }
