@@ -16,7 +16,7 @@ RUN case "${TARGETARCH}" in \
       -o /usr/local/bin/supercronic && \
     chmod +x /usr/local/bin/supercronic
 
-RUN pip install --no-cache-dir caldav vobject requests python-dateutil "notion-client>=1.0.0,<2.0.0"
+RUN pip install --no-cache-dir caldav vobject requests python-dateutil "notion-client>=1.0.0,<2.0.0" pyyaml
 
 WORKDIR /app
 COPY sync.py /app/sync.py

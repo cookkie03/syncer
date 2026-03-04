@@ -17,8 +17,6 @@ services:
     volumes:
       - ./vdirsyncer/status:/data/status
       - ./vdirsyncer/token:/data/token
-    environment:
-      - SYNC_INTERVAL_MINUTES=15
     healthcheck:
       test: ["CMD", "python", "-c", "import vdirsyncer; print('ok')"]
       interval: 5m
@@ -42,9 +40,8 @@ services:
       - 8.8.8.8
     volumes:
       - ./vtodo-notion/state:/data
-    environment:
-      - LOG_DIR=/data/logs
-      - SYNC_INTERVAL_MINUTES=5
+      - ./config.yaml:/app/config.yaml:ro
+      - ./shared:/shared:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import caldav, notion_client; print('ok')"]
       interval: 5m
@@ -52,7 +49,7 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── notion-backup: dual-track backup + hardlink snapshots ─────────────────
+  # ── notion-backup: JSON backup via official Notion API ──────────────────────
   notion-backup:
     build:
       context: ./notion-backup
@@ -63,6 +60,8 @@ services:
     env_file: .env
     volumes:
       - ./notion-backup/backup:/backup
+      - ./config.yaml:/app/config.yaml:ro
+      - ./shared:/shared:ro
     healthcheck:
       test: ["CMD", "python3", "-c", "import requests; print('ok')"]
       interval: 5m
@@ -81,6 +80,8 @@ services:
     env_file: .env
     volumes:
       - ./caldav-backup/backup:/backup
+      - ./config.yaml:/app/config.yaml:ro
+      - ./shared:/shared:ro
     environment:
       - CALDAV_BACKUP_DIR=/backup
     command: ["--watch", "--interval", "14400"]
@@ -109,13 +110,13 @@ services:
       - ./carddav-google-contacts/state:/data
       - ./carddav-google-contacts/backup:/data/backup
       - ./vdirsyncer/token:/data/token:ro
+      - ./config.yaml:/app/config.yaml:ro
+      - ./shared:/shared:ro
     environment:
       - LOG_DIR=/data/logs
       - DB_FILE=/data/sync_contacts.db
       - BACKUP_DIR=/data/backup
       - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google_contacts.json
-      - SYNC_INTERVAL=1440
-      - BACKUP_INTERVAL_MINUTES=1440
     healthcheck:
       test: ["CMD", "python3", "-c", "import googleapiclient, vobject, caldav; print('ok')"]
       interval: 5m
