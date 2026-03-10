@@ -22,4 +22,7 @@ __pycache__/
 skills-lock.json
 upgrade-guide-*.md
 
+# Git worktrees
+.worktrees/
+
 .git_old/
