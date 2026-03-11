@@ -41,7 +41,32 @@
       "Bash(\"C:/Users/lucam/OneDrive/Github/syncer/vtodo-notion/sync.py\":*)",
       "Bash(MSYS_NO_PATHCONV=1 docker exec:*)",
       "Bash(xargs grep:*)",
-      "Bash(MSYS_NO_PATHCONV=1 docker ps:*)"
+      "Bash(MSYS_NO_PATHCONV=1 docker ps:*)",
+      "Bash(where git:*)",
+      "Bash(PATH=\"/c/Program Files/Git/cmd:$PATH\" node \"$TEMP/claude-mem-installer.mjs\" --non-interactive 2>&1 | head -30)",
+      "Bash(where node:*)",
+      "Bash(PATH=\"/c/Program Files/Git/cmd:/c/Program Files/nodejs:$PATH\" node \"$TEMP/claude-mem-installer.mjs\" 2>&1 | head -40)",
+      "Bash(INSTALLER=\"C:/Users/lucam/AppData/Local/Temp/claude-mem-installer.mjs\" && PATH=\"/c/Program Files/Git/cmd:/c/Program Files/nodejs:$PATH\" node \"$INSTALLER\" 2>&1 | head -40)",
+      "Read(//c/Users/lucam/.claude/plugins/**)",
+      "Read(//c/Users/lucam/.claude/**)",
+      "Bash(PATH=\"/c/Program Files/nodejs:$PATH\" node \"C:/Users/lucam/AppData/Local/Temp/register-claude-mem.mjs\" 2>&1)",
+      "Bash(cd \"/c/Users/lucam/My Drive/Github/syncer/.worktrees/caldav-fallback/carddav-google-contacts\" && pip install pytest --quiet 2>&1 | tail -3 && python -m pytest test_carddav.py -v 2>&1 | tail -20)",
+      "Bash(ipconfig | grep -A 3 \"Wireless\\\\|Ethernet\" | grep \"IPv4\" | head -5)",
+      "Bash(ipconfig 2>&1 | grep -i \"ipv4\\\\|gateway\" | head -10)",
+      "Bash(nslookup calendar.lucamanca.synology.me 2>&1 | grep \"Address\" | tail -1)",
+      "Bash(find \"/c/Users/lucam/My Drive/Github/syncer\" -name \"google_contacts*\" -o -name \"*.json\" 2>/dev/null | grep -v __pycache__ | grep -v \".git\")",
+      "Bash(find \"/c/Users/lucam/My Drive/Github/syncer\" -name \"authorize*\" -o -name \"auth*.py\" 2>/dev/null | grep -v __pycache__ | grep -v \".git\")",
+      "Bash(cd \"/c/Users/lucam/My Drive/Github/syncer\" && .venv/Scripts/python.exe -c \"import google_auth_oauthlib; print\\('ok'\\)\" 2>&1)",
+      "Bash(\"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/python.exe\" -c \"import shutil; print\\(repr\\(shutil.which\\('vdirsyncer'\\)\\)\\)\")",
+      "Bash(\"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/python.exe\" -c \"import google_auth_oauthlib; print\\('ok'\\)\" 2>&1)",
+      "Bash(\"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/pip.exe\" install requests google-auth-oauthlib --quiet 2>&1 | tail -3)",
+      "Bash(\"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/pip.exe\" install requests --force-reinstall --quiet 2>&1 && \"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/python.exe\" -c \"import requests; print\\('requests ok'\\)\" 2>&1)",
+      "Bash(\"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/pip.exe\" install requests --ignore-installed --quiet 2>&1 | tail -5)",
+      "Bash(\"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/python.exe\" -c \"import requests; import google_auth_oauthlib; print\\('all ok'\\)\" 2>&1)",
+      "Bash(\"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/pip.exe\" install \"google-auth[pyopenssl]\" google-auth-oauthlib --quiet 2>&1 | tail -5)",
+      "Bash(\"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/pip.exe\" install rsa --quiet 2>&1 | tail -3 && \"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/python.exe\" -c \"import requests; import google_auth_oauthlib; print\\('all ok'\\)\" 2>&1)",
+      "Bash(\"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/python.exe\" -c \"import sys; print\\(sys.path\\)\" 2>&1 && ls \"/c/Users/lucam/My Drive/Github/syncer/.venv/Lib/\" 2>&1)",
+      "Bash(\"/c/Users/lucam/My Drive/Github/syncer/.venv/Scripts/pip.exe\" install rsa --no-deps --ignore-installed -q 2>&1 | tail -5 && ls \"/c/Users/lucam/My Drive/Github/syncer/.venv/Lib/site-packages/rsa\" 2>&1 | head -3)"
     ]
   }
 }

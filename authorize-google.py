@@ -129,14 +129,16 @@ def main():
 
     # vdirsyncer 0.20.x dropped the 'authorize' command.
     # OAuth is now triggered automatically during 'discover' when no token exists.
-    result = subprocess.run(
-        [vdirsyncer_exe, "-c", str(config_path), "discover"],
-        env=proc_env,
-    )
-
-    if result.returncode != 0:
-        print("\nERROR: discover failed — see output above.")
-        # We continue to contacts auth anyway if possible
+    try:
+        result = subprocess.run(
+            [vdirsyncer_exe, "-c", str(config_path), "discover"],
+            env=proc_env,
+        )
+        if result.returncode != 0:
+            print("\nERROR: discover failed — see output above.")
+            # We continue to contacts auth anyway if possible
+    except FileNotFoundError:
+        print("vdirsyncer not found locally — skipping Google Calendar auth (token already exists in Docker).")
 
     # ── Google People API Auth ────────────────────────────────────────────
     if not contacts_token_path.exists():
