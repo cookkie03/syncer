@@ -145,7 +145,14 @@ def fetch_blocks(session: requests.Session, block_id: str) -> list[dict]:
         data = api_get(session, f"/blocks/{block_id}/children", params=params)
         for block in data.get("results", []):
             if block.get("has_children"):
-                block["_children"] = fetch_blocks(session, block["id"])
+                try:
+                    block["_children"] = fetch_blocks(session, block["id"])
+                except requests.HTTPError as exc:
+                    if exc.response is not None and exc.response.status_code == 404:
+                        log.warning("[Track1] block %s has_children=True but children returned 404 — skipping", block["id"])
+                        block["_children"] = []
+                    else:
+                        raise
             blocks.append(block)
         if not data.get("has_more"):
             break

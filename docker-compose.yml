@@ -1,3 +1,17 @@
+x-dns-hosts: &dns-hosts
+  # Docker Desktop on Windows/WSL2 blocks UDP/53 and the ISP DNS
+  # (Telecom Italia) hijacks NXDOMAIN. extra_hosts bypasses DNS entirely.
+  # Update IPs if they change: resolve via DoH (curl 'https://1.1.1.1/dns-query?name=HOST&type=A' -H 'accept: application/dns-json')
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+    - "calendar.lucamanca.synology.me:${SYNOLOGY_IP:-79.50.144.75}"
+    - "api.notion.com:${NOTION_API_IP:-208.103.161.2}"
+    - "api.telegram.org:${TELEGRAM_API_IP:-149.154.166.110}"
+    - "www.googleapis.com:${GOOGLEAPIS_IP:-192.178.203.95}"
+    - "oauth2.googleapis.com:${GOOGLEAPIS_OAUTH_IP:-142.251.127.95}"
+    - "gmail.googleapis.com:${GMAIL_API_IP:-142.250.181.170}"
+    - "people.googleapis.com:${PEOPLE_API_IP:-142.251.141.234}"
+
 services:
 
   # ── vdirsyncer: CalDAV → Google Calendar ──────────────────────────────────
@@ -9,11 +23,7 @@ services:
     image: caldav-sync/vdirsyncer:local
     restart: unless-stopped
     env_file: .env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    dns:
-      - 192.168.1.1
-      - 8.8.8.8
+    <<: *dns-hosts
     volumes:
       - ./vdirsyncer/status:/data/status
       - ./vdirsyncer/token:/data/token
@@ -33,11 +43,7 @@ services:
     image: caldav-sync/vtodo-notion:local
     restart: unless-stopped
     env_file: .env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    dns:
-      - 192.168.1.1
-      - 8.8.8.8
+    <<: *dns-hosts
     volumes:
       - ./vtodo-notion/state:/data
       - ./config.yaml:/app/config.yaml:ro
@@ -58,10 +64,14 @@ services:
     image: caldav-sync/notion-backup:local
     restart: unless-stopped
     env_file: .env
+    <<: *dns-hosts
     volumes:
       - ./notion-backup/backup:/backup
+      - ./vdirsyncer/token:/data/token:ro
       - ./config.yaml:/app/config.yaml:ro
       - ./shared:/shared:ro
+    environment:
+      - GOOGLE_GMAIL_TOKEN_FILE=/data/token/google_gmail.json
     healthcheck:
       test: ["CMD", "python3", "-c", "import requests; print('ok')"]
       interval: 5m
@@ -78,6 +88,7 @@ services:
     image: caldav-sync/caldav-backup:local
     restart: unless-stopped
     env_file: .env
+    <<: *dns-hosts
     volumes:
       - ./caldav-backup/backup:/backup
       - ./config.yaml:/app/config.yaml:ro
@@ -101,11 +112,7 @@ services:
     image: caldav-sync/carddav-google-contacts:local
     restart: unless-stopped
     env_file: .env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    dns:
-      - 192.168.1.1
-      - 8.8.8.8
+    <<: *dns-hosts
     volumes:
       - ./carddav-google-contacts/state:/data
       - ./carddav-google-contacts/backup:/data/backup

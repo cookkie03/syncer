@@ -55,6 +55,31 @@ def authorize_people_api(client_id, client_secret, token_path):
     print()
 
 
+def authorize_gmail_api(client_id, client_secret, token_path):
+    print("=" * 60)
+    print("Google Gmail API authorization")
+    print("=" * 60)
+    
+    config = {
+        "installed": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
+    
+    scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
+    flow = InstalledAppFlow.from_client_config(config, scopes)
+    creds = flow.run_local_server(port=0)
+    
+    with open(token_path, "w") as f:
+        f.write(creds.to_json())
+    
+    print(f"Token saved to: {token_path}")
+    print()
+
+
 def main():
     root = pathlib.Path(__file__).parent
 
@@ -84,10 +109,12 @@ def main():
     
     token_path = token_dir / "google.json"
     contacts_token_path = token_dir / "google_contacts.json"
+    gmail_token_path = token_dir / "google_gmail.json"
     
     # Use as_posix() — vdirsyncer config parser rejects Windows backslashes.
     env["GOOGLE_TOKEN_FILE"] = token_path.as_posix()
     env["GOOGLE_CONTACTS_TOKEN_FILE"] = contacts_token_path.as_posix()
+    env["GOOGLE_GMAIL_TOKEN_FILE"] = gmail_token_path.as_posix()
 
     # ── Render config template ─────────────────────────────────────────────
     with open(template_file, encoding="utf-8") as f:
@@ -151,11 +178,22 @@ def main():
             print("\nWARNING: 'google-auth-oauthlib' not found. Skipping Contacts authorization.")
             print("To authorize contacts, run: pip install google-auth-oauthlib")
 
+    # ── Google Gmail API Auth ────────────────────────────────────────────
+    if not gmail_token_path.exists():
+        if HAS_GOOGLE_AUTH:
+            try:
+                authorize_gmail_api(env["GOOGLE_CLIENT_ID"], env["GOOGLE_CLIENT_SECRET"], gmail_token_path)
+            except Exception as e:
+                print(f"ERROR: Gmail API authorization failed: {e}")
+        else:
+            print("\nWARNING: 'google-auth-oauthlib' not found. Skipping Gmail authorization.")
+            print("To authorize Gmail, run: pip install google-auth-oauthlib")
+
     # Clean up temp config
     if config_path.exists():
         config_path.unlink()
 
-    if not token_path.exists() and not contacts_token_path.exists():
+    if not token_path.exists() and not contacts_token_path.exists() and not gmail_token_path.exists():
         print("\nERROR: No token files were created.")
         sys.exit(1)
 

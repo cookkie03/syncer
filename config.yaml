@@ -66,10 +66,12 @@ vdirsyncer:
 # ── notion-backup: Backup Notion via API ufficiale ────────────────────────
 
 notion_backup:
-  backup_schedule: "0 2 * * *"    # Cron syntax (default: ogni giorno alle 02:00 UTC)
+  backup_schedule: "0 2 * * *"    # Cron syntax (default: ogni giorno alle 02:00 UTC) per backup API
+  export_schedule: "0 3 * * *"    # Cron syntax (default: ogni giorno alle 03:00 UTC) per scaricare export da Gmail
   rate_limit_rps: 3               # Richieste al secondo verso Notion API
   notion_api_version: "2022-06-28"
   backup_dir: "/backup"           # Percorso nel container
+  max_zip_exports: 7              # Numero massimo di backup ZIP da conservare
 
 
 # ── caldav-backup: Backup CalDAV → file ICS ───────────────────────────────

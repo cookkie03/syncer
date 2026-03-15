@@ -29,6 +29,7 @@ WORKDIR /app
 COPY config.template /app/config.template
 COPY entrypoint.sh /app/entrypoint.sh
 COPY sync-notify.sh /app/sync-notify.sh
+COPY sync_wrapper.py /app/sync_wrapper.py
 RUN chmod +x /app/entrypoint.sh /app/sync-notify.sh
 
 # Vdirsyncer config and status directories

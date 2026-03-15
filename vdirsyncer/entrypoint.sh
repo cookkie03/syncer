@@ -22,6 +22,12 @@ mkdir -p "$CONFIG_DIR"
 envsubst < /app/config.template > "$CONFIG_FILE"
 echo "[entrypoint] Config written to $CONFIG_FILE"
 
+# Force direct DNS if Docker's internal resolver (127.0.0.11) is broken
+if ! python3 -c "import socket; socket.setdefaulttimeout(3); socket.getaddrinfo('google.com', 443)" >/dev/null 2>&1; then
+    echo "[entrypoint] DNS broken via Docker resolver — switching to direct 1.1.1.1 + 8.8.8.8"
+    printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
+fi
+
 # ── Run initial discover + sync ────────────────────────────────────────────
 echo "[entrypoint] Running initial vdirsyncer discover..."
 yes | vdirsyncer discover || {

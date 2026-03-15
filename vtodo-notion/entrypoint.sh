@@ -37,6 +37,12 @@ else
     CRON_EXPRESSION="0 0 * * *"
 fi
 
+# Force direct DNS if Docker's internal resolver (127.0.0.11) is broken
+if ! python3 -c "import socket; socket.setdefaulttimeout(3); socket.getaddrinfo('api.notion.com', 443)" >/dev/null 2>&1; then
+    echo "[entrypoint] DNS broken via Docker resolver — switching to direct 1.1.1.1 + 8.8.8.8"
+    printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
+fi
+
 echo "[entrypoint] Running initial sync..."
 python /app/sync.py || echo "[entrypoint] WARNING: initial sync failed — will retry on schedule"
 
