@@ -1,5 +1,5 @@
 #!/bin/sh
-# sync-notify.sh — wraps `vdirsyncer sync`, then sends a Telegram summary.
+# sync-notify.sh — wraps `python3 /app/sync_wrapper.py sync`, then sends a Telegram summary.
 #
 # Behaviour:
 #   • On errors  : always notify with the full error lines + debug tracebacks.
@@ -23,7 +23,7 @@ OUTPUT_FILE="/tmp/vdirsyncer_output"
 # We always run with -v (verbose) so the output contains "Copying …" lines.
 # If errors are found we re-run with -vdebug to get tracebacks (see below).
 set +e
-vdirsyncer sync > "$OUTPUT_FILE" 2>&1
+python3 /app/sync_wrapper.py sync > "$OUTPUT_FILE" 2>&1
 EXIT_CODE=$?
 
 # vdirsyncer 0.20.x has a concurrency bug where async Google Calendar sessions
@@ -40,7 +40,7 @@ if [ "$EXIT_CODE" -ne 0 ] && grep -q "Session is closed" "$OUTPUT_FILE"; then
     RETRY_EXIT=0
     while IFS= read -r COLLECTION; do
         echo "[sync-notify] Retrying $COLLECTION individually..."
-        vdirsyncer sync "$COLLECTION" > "$RETRY_FILE" 2>&1
+        python3 /app/sync_wrapper.py sync "$COLLECTION" > "$RETRY_FILE" 2>&1
         COLL_EXIT=$?
         cat "$RETRY_FILE" >> "$OUTPUT_FILE"
         [ "$COLL_EXIT" -ne 0 ] && RETRY_EXIT=$COLL_EXIT
@@ -117,34 +117,29 @@ _Exit code: ${EXIT_CODE} | Items copied this run: ${COPY_COUNT}_"
   exit "$EXIT_CODE"
 fi
 
-# ── Notify on success (heartbeat) ────────────────────────────────────────────
-if [ "$NOTIFY_OK_EVERY_HOURS" -gt 0 ]; then
-  NOW=$(date +%s)
-  LAST=0
-  if [ -f "$HEARTBEAT_FILE" ]; then
-    LAST=$(cat "$HEARTBEAT_FILE")
+# ── Notify on success (only if things changed) ─────────────────────────────
+if [ "$COPY_COUNT" -gt 0 ] || [ -s "/tmp/vdirsyncer_changed_names.txt" ]; then
+  # Build a per-calendar summary line
+  CALENDARS_SUMMARY=$(printf '%s\n' "$SYNC_LINES" | sed 's/^Syncing caldav_gcal\//  • /' || true)
+
+  WARN_SECTION=""
+  if [ -n "$WARN_LINES" ]; then
+    WARN_SECTION=$(printf '\n\n*Warnings:*\n```\n%s\n```' "$(printf '%s\n' "$WARN_LINES" | head -10)")
   fi
-  ELAPSED_HOURS=$(( (NOW - LAST) / 3600 ))
 
-  if [ "$ELAPSED_HOURS" -ge "$NOTIFY_OK_EVERY_HOURS" ]; then
-    # Build a per-calendar summary line
-    CALENDARS_SUMMARY=$(printf '%s\n' "$SYNC_LINES" | sed 's/^Syncing caldav_gcal\//  • /' || true)
+  CHANGED_NAMES=""
+  if [ -s "/tmp/vdirsyncer_changed_names.txt" ]; then
+    CHANGED_NAMES=$(printf '\n\n*Eventi aggiornati:*\n%s' "$(cat /tmp/vdirsyncer_changed_names.txt | sed 's/^/  - /')")
+  fi
 
-    WARN_SECTION=""
-    if [ -n "$WARN_LINES" ]; then
-      WARN_SECTION=$(printf '\n\n*Warnings:*\n```\n%s\n```' "$(printf '%s\n' "$WARN_LINES" | head -10)")
-    fi
-
-    MSG="✅ *vdirsyncer sync OK*
+  MSG="✅ *vdirsyncer sync*
 
 *Calendars synced:*
 ${CALENDARS_SUMMARY}
 
-Items copied: *${COPY_COUNT}*${WARN_SECTION}
+Items copied: *${COPY_COUNT}*${CHANGED_NAMES}${WARN_SECTION}"
 
-_Next heartbeat in ${NOTIFY_OK_EVERY_HOURS}h_"
-
-    telegram_send "$MSG"
-    echo "$NOW" > "$HEARTBEAT_FILE"
-  fi
+  telegram_send "$MSG"
+  # Clear changed names
+  rm -f /tmp/vdirsyncer_changed_names.txt
 fi

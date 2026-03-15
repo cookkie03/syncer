@@ -5,7 +5,9 @@
 *token/
 *status/
 *state/
-*backup/
+**/backup/
+!notion-backup/
+!caldav-backup/
 
 # Legacy output folders
 logs-vtodo/
@@ -20,7 +22,7 @@ __pycache__/
 
 # Claude Code artifacts
 skills-lock.json
-upgrade-guide-*.md
+.claude
 
 # Git worktrees
 .worktrees/

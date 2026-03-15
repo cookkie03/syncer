@@ -6,6 +6,7 @@ Architecture: Snapshot & Reconcile.
 
 import hashlib
 import json
+import typing
 import logging
 import sys
 import time
@@ -49,6 +50,7 @@ TELEGRAM_TIMEOUT          = cfg("shared.telegram_timeout", 10, int)
 RECURRING_CLEANUP_DAYS    = cfg("vtodo_notion.recurring_cleanup_days", 5, int)
 DESCRIPTION_MAX_CHARS     = cfg("vtodo_notion.description_max_chars", 1990, int)
 HASH_LENGTH               = cfg("vtodo_notion.hash_length", 16, int)
+MAX_DELETIONS_PER_CYCLE   = cfg("vtodo_notion.max_deletions_per_cycle", 10, int)
 LOG_LEVEL_FILE            = cfg("vtodo_notion.log_level_file", "DEBUG")
 LOG_LEVEL_STDOUT          = cfg("vtodo_notion.log_level_stdout", "INFO")
 LOG_DATE_FORMAT_FILE      = "%Y-%m-%dT%H:%M:%SZ"
@@ -320,17 +322,25 @@ def write_caldav(calendars: list, task: TaskData) -> bool:
 
 def delete_caldav(calendars: list, uid: str) -> bool:
     """Delete a VTODO from CalDAV by UID. Searches all calendars."""
+    found = False
+    error_occurred = False
     for cal in calendars:
         try:
             results = cal.search(todo=True, uid=uid)
             for r in results:
                 r.delete()
                 log.info("[CalDAV] Deleted %s from '%s'", uid[:30], cal.get_display_name())
-                return True
-        except Exception:
-            continue
-    log.warning("[CalDAV] Could not find %s to delete", uid[:30])
-    return False
+                found = True
+        except Exception as e:
+            log.warning("[CalDAV] Search/delete failed on '%s' for %s: %s", cal.get_display_name(), uid[:30], e)
+            error_occurred = True
+
+    if found:
+        return True
+    if error_occurred:
+        return False
+    log.warning("[CalDAV] Could not find %s to delete (already deleted?)", uid[:30])
+    return True
 
 
 # ── Notion Layer ──────────────────────────────────────────────────────────
@@ -366,8 +376,10 @@ def parse_notion_page(page: dict) -> TaskData:
             due = raw_due[:10]  # YYYY-MM-DD only
 
     is_completed = False
+    status_name = "Not started"
     if props.get("Completato"):
-        is_completed = props["Completato"].get("status", {}).get("name", "") == "Done"
+        status_name = props["Completato"].get("status", {}).get("name", "Not started")
+        is_completed = status_name == "Done"
 
     return TaskData(
         uid=_get_rt(props, "UID CalDAV"),
@@ -375,7 +387,7 @@ def parse_notion_page(page: dict) -> TaskData:
         description=_get_rt(props, "Descrizione"),
         due=due,
         priority=_get_sel(props, "Priorità", "Nessuna"),
-        status="Completato" if is_completed else "In corso",
+        status=status_name,
         is_completed=is_completed,
         location=_get_rt(props, "Luogo"),
         url=(props.get("URL") or {}).get("url") or "",
@@ -387,10 +399,15 @@ def parse_notion_page(page: dict) -> TaskData:
 
 
 def fetch_notion_snapshot(notion: Client, database_id: str) -> dict[str, TaskData]:
-    """Fetch all active Notion pages. Assigns a UID to pages missing one."""
+    """Fetch all active Notion pages. Assigns a UID to pages missing one.
+
+    Raises on network/API errors so the caller can abort the sync
+    instead of treating an empty snapshot as 'everything was deleted'.
+    """
     snapshot: dict[str, TaskData] = {}
     has_more = True
     cursor = None
+    pages_fetched = 0
 
     while has_more:
         try:
@@ -398,38 +415,44 @@ def fetch_notion_snapshot(notion: Client, database_id: str) -> dict[str, TaskDat
             if cursor:
                 params["start_cursor"] = cursor
             resp = notion.databases.query(**params)
-            for page in resp.get("results", []):
-                task = parse_notion_page(page)
-                if not task.uid:
-                    # New page created manually in Notion — assign a UUID
-                    new_uid = str(uuid.uuid4()).upper()
-                    try:
-                        notion.pages.update(
-                            page_id=page["id"],
-                            properties={"UID CalDAV": {"rich_text": [{"text": {"content": new_uid}}]}},
-                        )
-                        task.uid = new_uid
-                        log.info("[Notion] Assigned UID %s to page '%s'", new_uid[:8], task.summary[:30])
-                    except Exception as e:
-                        log.error("[Notion] Failed to assign UID to '%s': %s", task.summary[:30], e)
-                        continue
-                # Dedup: if UID already seen, keep best and archive loser
-                existing = snapshot.get(task.uid)
-                if existing:
-                    winner = _pick_best(existing, task)
-                    loser = task if winner is existing else existing
-                    if loser.notion_page_id:
-                        log.info("[Notion] Duplicate UID %s: archiving '%s' (page %s)",
-                                 task.uid[:30], loser.summary[:30], loser.notion_page_id[:8])
-                        archive_notion(notion, loser.notion_page_id)
-                    snapshot[task.uid] = winner
-                else:
-                    snapshot[task.uid] = task
-            has_more = resp.get("has_more", False)
-            cursor = resp.get("next_cursor")
         except Exception as e:
-            log.error("[Notion] Fetch error: %s", e)
+            if pages_fetched == 0:
+                # First page failed — network/auth error, propagate
+                raise RuntimeError(f"Notion API unreachable: {e}") from e
+            # Partial fetch — log and stop paginating but keep what we got
+            log.error("[Notion] Fetch error after %d pages: %s", pages_fetched, e)
             break
+
+        for page in resp.get("results", []):
+            task = parse_notion_page(page)
+            if not task.uid:
+                # New page created manually in Notion — assign a UUID
+                new_uid = str(uuid.uuid4()).upper()
+                try:
+                    notion.pages.update(
+                        page_id=page["id"],
+                        properties={"UID CalDAV": {"rich_text": [{"text": {"content": new_uid}}]}},
+                    )
+                    task.uid = new_uid
+                    log.info("[Notion] Assigned UID %s to page '%s'", new_uid[:8], task.summary[:30])
+                except Exception as e:
+                    log.error("[Notion] Failed to assign UID to '%s': %s", task.summary[:30], e)
+                    continue
+            # Dedup: if UID already seen, keep best and archive loser
+            existing = snapshot.get(task.uid)
+            if existing:
+                winner = _pick_best(existing, task)
+                loser = task if winner is existing else existing
+                if loser.notion_page_id:
+                    log.info("[Notion] Duplicate UID %s: archiving '%s' (page %s)",
+                             task.uid[:30], loser.summary[:30], loser.notion_page_id[:8])
+                    archive_notion(notion, loser.notion_page_id)
+                snapshot[task.uid] = winner
+            else:
+                snapshot[task.uid] = task
+        pages_fetched += 1
+        has_more = resp.get("has_more", False)
+        cursor = resp.get("next_cursor")
 
     log.info("[Notion] Snapshot: %d pages", len(snapshot))
     return snapshot
@@ -441,7 +464,7 @@ def build_notion_props(task: TaskData) -> dict:
     props: dict[str, Any] = {
         "Name": {"title": [{"text": {"content": task.summary or DEFAULT_TITLE}}]},
         "UID CalDAV": {"rich_text": [{"text": {"content": task.uid}}]},
-        "Completato": {"status": {"name": "Done" if task.is_completed else "Not started"}},
+        "Completato": {"status": {"name": "Done" if task.is_completed else ("In progress" if task.status == "In progress" else "Not started")}},
         # Optional fields: write value or null to clear
         "Descrizione": {"rich_text": [{"text": {"content": task.description[:DESCRIPTION_MAX_CHARS]}}] if task.description else []},
         "Scadenza": {"date": {"start": task.due[:10]}} if task.due else {"date": None},
@@ -669,7 +692,7 @@ def reconcile(
     notion: Client,
     database_id: str,
     calendars: list,
-) -> dict[str, int]:
+) -> dict[str, typing.Any]:
     """Core reconciliation loop.
 
     Categorizes every UID into buckets and applies rules:
@@ -680,13 +703,14 @@ def reconcile(
 
     First-run safety: if known_uids is empty, no deletions are propagated.
     """
-    stats: dict[str, int] = {
-        "created_notion": 0, "created_caldav": 0,
-        "updated_notion": 0, "updated_caldav": 0,
-        "archived_notion": 0, "deleted_caldav": 0,
-        "recurring_advanced": 0, "skipped": 0, "errors": 0,
+    stats: dict[str, typing.Any] = {
+        "created_notion": [], "created_caldav": [],
+        "updated_notion": [], "updated_caldav": [],
+        "archived_notion": [], "deleted_caldav": [],
+        "recurring_advanced": [], "skipped": 0, "errors": 0,
     }
     consecutive_errors = 0
+    deletions_this_cycle = 0
     new_known: dict[str, str] = {}
     is_first_run = len(state.known_uids) == 0
 
@@ -720,7 +744,7 @@ def reconcile(
                 if nt.is_completed and nt.rrule:
                     ok = _handle_recurring_completed_notion(nt, ct, notion, database_id, calendars)
                     if ok:
-                        stats["recurring_advanced"] += 1
+                        stats["recurring_advanced"].append(nt.summary)
                         consecutive_errors = 0
                     else:
                         stats["errors"] += 1
@@ -732,7 +756,7 @@ def reconcile(
                 if nt.is_completed and not nt.rrule:
                     ok = _handle_oneshot_completed_notion(nt, ct, notion, calendars)
                     if ok:
-                        stats["archived_notion"] += 1
+                        stats["archived_notion"].append(nt.summary if nt else (ct.summary if ct else "Sconosciuto"))
                         consecutive_errors = 0
                     else:
                         stats["errors"] += 1
@@ -743,7 +767,7 @@ def reconcile(
                 if ct.is_completed and not ct.rrule:
                     if nt.notion_page_id and archive_notion(notion, nt.notion_page_id):
                         log.info("[Sync] Archived completed one-shot (CalDAV→Notion): %s", uid[:30])
-                        stats["archived_notion"] += 1
+                        stats["archived_notion"].append(nt.summary if nt else (ct.summary if ct else "Sconosciuto"))
                         consecutive_errors = 0
                     else:
                         stats["errors"] += 1
@@ -787,9 +811,14 @@ def reconcile(
                             log.info("[Sync] Adjusting RRULE for %s: %s → %s", uid[:30], ct.rrule, adjusted_rrule)
                             write_caldav(calendars, _clone(ct, rrule=adjusted_rrule))
                             caldav_display = _clone(caldav_display, rrule=adjusted_rrule)
+                    
+                    # Preserve Notion's "In progress" status
+                    if not caldav_display.is_completed and nt.status == "In progress":
+                        caldav_display = _clone(caldav_display, status="In progress")
+
                     if write_notion(notion, database_id, caldav_display, nt.notion_page_id):
                         log.info("[Sync] Updated Notion (CalDAV wins): %s", uid[:30])
-                        stats["updated_notion"] += 1
+                        stats["updated_notion"].append(ct.summary)
                         consecutive_errors = 0
                     else:
                         stats["errors"] += 1
@@ -802,7 +831,7 @@ def reconcile(
                         task_to_write = _clone(task_to_write, rrule=adjusted_rrule)
                     if write_caldav(calendars, task_to_write):
                         log.info("[Sync] Updated CalDAV (Notion wins): %s", uid[:30])
-                        stats["updated_caldav"] += 1
+                        stats["updated_caldav"].append(nt.summary)
                         consecutive_errors = 0
                     else:
                         stats["errors"] += 1
@@ -816,9 +845,15 @@ def reconcile(
 
                 if was_known and not is_first_run:
                     # Was synced before, now gone from Notion → user deleted it from Notion
+                    if deletions_this_cycle >= MAX_DELETIONS_PER_CYCLE:
+                        log.warning("[Safety] Deletion cap (%d) reached — preserving '%s' (%s)",
+                                    MAX_DELETIONS_PER_CYCLE, ct.summary[:40], uid[:30])
+                        new_known[uid] = state.known_uids.get(uid, ct.content_hash())
+                        continue
                     if delete_caldav(calendars, uid):
-                        log.info("[Sync] Deleted from CalDAV (Notion deletion): %s", uid[:30])
-                        stats["deleted_caldav"] += 1
+                        log.info("[Sync] Deleted from CalDAV (Notion deletion): %s '%s'", uid[:30], ct.summary[:40])
+                        stats["deleted_caldav"].append(ct.summary)
+                        deletions_this_cycle += 1
                         consecutive_errors = 0
                     else:
                         stats["errors"] += 1
@@ -837,7 +872,7 @@ def reconcile(
                 task_to_write = _with_display_due(ct) if ct.rrule else ct
                 if write_notion(notion, database_id, task_to_write):
                     log.info("[Sync] Created in Notion: %s '%s'", uid[:30], ct.summary[:30])
-                    stats["created_notion"] += 1
+                    stats["created_notion"].append(ct.summary)
                     consecutive_errors = 0
                 else:
                     stats["errors"] += 1
@@ -851,9 +886,15 @@ def reconcile(
 
                 if was_known and not is_first_run:
                     # Was synced before, now gone from CalDAV → user deleted it from CalDAV
+                    if deletions_this_cycle >= MAX_DELETIONS_PER_CYCLE:
+                        log.warning("[Safety] Deletion cap (%d) reached — preserving '%s' (%s)",
+                                    MAX_DELETIONS_PER_CYCLE, nt.summary[:40], uid[:30])
+                        new_known[uid] = state.known_uids.get(uid, nt.content_hash())
+                        continue
                     if nt.notion_page_id and archive_notion(notion, nt.notion_page_id):
-                        log.info("[Sync] Archived in Notion (CalDAV deletion): %s", uid[:30])
-                        stats["archived_notion"] += 1
+                        log.info("[Sync] Archived in Notion (CalDAV deletion): %s '%s'", uid[:30], nt.summary[:40])
+                        stats["archived_notion"].append(nt.summary)
+                        deletions_this_cycle += 1
                         consecutive_errors = 0
                     else:
                         stats["errors"] += 1
@@ -863,7 +904,7 @@ def reconcile(
                 # New on Notion: create on CalDAV
                 if write_caldav(calendars, nt):
                     log.info("[Sync] Created in CalDAV: %s '%s'", uid[:30], nt.summary[:30])
-                    stats["created_caldav"] += 1
+                    stats["created_caldav"].append(nt.summary)
                     consecutive_errors = 0
                 else:
                     stats["errors"] += 1
@@ -883,6 +924,12 @@ def reconcile(
             # Preserve in new_known to avoid accidental deletion next cycle
             if uid in state.known_uids:
                 new_known[uid] = state.known_uids[uid]
+
+    if deletions_this_cycle >= MAX_DELETIONS_PER_CYCLE:
+        log.warning("[Safety] Deletion cap reached (%d). Some deletions deferred to next cycle.", deletions_this_cycle)
+        notify("vtodo-notion: deletion cap",
+               f"Raggiunte {deletions_this_cycle} eliminazioni in un ciclo (limite: {MAX_DELETIONS_PER_CYCLE}). "
+               "Alcune eliminazioni rimandate al prossimo ciclo. Controlla i log.")
 
     state.known_uids = new_known
     log.info("[Reconcile] Done. known_uids updated to %d entries", len(new_known))
@@ -979,6 +1026,22 @@ def sync() -> None:
     caldav_snap = fetch_caldav_snapshot(client)
     notion_snap = fetch_notion_snapshot(notion, NOTION_DATABASE_ID)
 
+    # Safety: abort if Notion returned empty but CalDAV has data and state exists.
+    # This prevents mass-deleting CalDAV tasks when Notion is temporarily unreachable.
+    if (
+        len(notion_snap) == 0
+        and len(caldav_snap) > 0
+        and len(state.known_uids) > 0
+    ):
+        msg = (
+            f"Notion snapshot is empty but CalDAV has {len(caldav_snap)} tasks "
+            f"and state tracks {len(state.known_uids)} UIDs. "
+            "Aborting sync to prevent mass deletion."
+        )
+        log.error("[Safety] %s", msg)
+        notify("vtodo-notion: sync abortito", msg)
+        return
+
     # Reconcile
     stats = reconcile(caldav_snap, notion_snap, state, notion, NOTION_DATABASE_ID, calendars)
 
@@ -997,33 +1060,35 @@ def sync() -> None:
         "updated_notion=%d updated_caldav=%d | "
         "archived_notion=%d deleted_caldav=%d | "
         "recurring_advanced=%d skipped=%d errors=%d",
-        stats["created_notion"], stats["created_caldav"],
-        stats["updated_notion"], stats["updated_caldav"],
-        stats["archived_notion"], stats["deleted_caldav"],
-        stats["recurring_advanced"], stats["skipped"], stats["errors"],
+        len(stats["created_notion"]), len(stats["created_caldav"]),
+        len(stats["updated_notion"]), len(stats["updated_caldav"]),
+        len(stats["archived_notion"]), len(stats["deleted_caldav"]),
+        len(stats["recurring_advanced"]), stats["skipped"], stats["errors"],
     )
     log.info("=" * 60)
 
     # Notify on changes or errors
-    total_ops = sum(v for k, v in stats.items() if k != "skipped")
-    changes = total_ops - stats["errors"]
+    total_ops = sum(len(v) for k, v in stats.items() if isinstance(v, list))
+    changes = total_ops
     if changes > 0:
         lines = []
         for key, emoji in [
             ("created_notion", "📥"), ("created_caldav", "📤"),
             ("updated_notion", "✏️"), ("updated_caldav", "✏️"),
-            ("archived_notion", "🗃"), ("deleted_caldav", "🗑"),
+            ("archived_notion", "🗃️"), ("deleted_caldav", "🗑️"),
             ("recurring_advanced", "🔄"),
         ]:
             if stats[key]:
-                lines.append(f"{emoji} {key.replace('_', ' ')}: {stats[key]}")
+                lines.append(f"{emoji} {key.replace('_', ' ')}: {len(stats[key])}")
+                for item in stats[key]:
+                    lines.append(f"  - {item}")
         if stats["errors"]:
             lines.append(f"⚠️ errori: {stats['errors']}")
         notify("vtodo-notion sync", "\n".join(lines))
     elif stats["errors"] > 0:
         notify(
             "vtodo-notion: errori sync",
-            f"{stats['errors']} errori su {total_ops} operazioni. Controlla i log.",
+            f"{stats['errors']} errori su {total_ops + stats['errors']} operazioni. Controlla i log.",
         )
 
 
