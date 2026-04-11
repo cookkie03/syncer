@@ -30,10 +30,10 @@ Copy the example file and fill in every value:
 
 ```bash
 # Linux / Mac / Synology SSH
-cp .env.example .env
+cp config/.env.example .env
 
 # Windows PowerShell
-Copy-Item .env.example .env
+Copy-Item config/.env.example .env
 ```
 
 The sections below explain where to find each value. Do not commit `.env` to git — it contains secrets.
