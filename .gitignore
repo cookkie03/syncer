@@ -1,30 +1,178 @@
-# Secrets
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYNCER PROJECT — .gitignore
+# Robust, maintainable gitignore for multi-service sync infrastructure
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECRETS & CREDENTIALS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Environment files with real credentials
 .env
+.env.local
+.env.*.local
+secrets.yaml
+secrets.yml
+secrets.json
+credentials.yaml
+credentials.yml
+credentials.json
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+*.keytab
 
-# Runtime data — bind-mounted volumes (not source code)
+# Token files (OAuth, API tokens, etc.)
 *token/
-*status/
-*state/
-**/backup/
-!notion-backup/
-!caldav-backup/
+*.token
+*token*.json
+*access_token*
+*refresh_token*
 
-# Legacy output folders
+# Generated config files with credentials
+vdirsyncer-authorize.cfg
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RUNTIME STATE & SYNCHRONIZATION DATA
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Vdirsyncer (CalDAV ↔ Google sync)
+vdirsyncer/status/
+vdirsyncer/token/
+
+# vtodo-notion sync state
+vtodo-notion/state/
+vtodo-notion/logs/
+vtodo-notion/*.log
+vtodo-notion/*.bak
+
+# CardDAV sync state
+carddav-google-contacts/state/
+carddav-google-contacts/*.log
+
+# Any status or state directories anywhere
+status/
+*/status/
+*/status/*
+state/
+*/state/
+*/state/*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATA DIRECTORIES (bind-mounted runtime volumes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+data/
+*/data/
+*/data/*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BACKUPS (calendar, contacts, notion exports)
+# ─────────────────────────────────────────────────────────────────────────────
+
+backup/
+*/backup/
+*.backup
+*_backup/
+**/backup/*
+!caldav-backup/backup/*.ics
+!notion-backup/backup/*.zip
+
+# CardDAV VCF backups
+carddav-google-contacts/backup/*.vcf
+carddav-google-contacts/backup/*.vcf.*
+
+# Notion export snapshots
+notion-backup/backup/snapshots/
+notion-backup/backup/zip_exports/
+notion-backup/backup/*.zip
+
+# Personal backups
+personal/
+
+# Legacy backup folders
 logs-vtodo/
 caldav-backup-output/
-backup/
 
-# Python virtual environment
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTHON
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Virtual environments
 .venv/
+venv/
+env/
+ENV/
 
-# Python bytecode cache
+# Bytecode
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
 
-# Claude Code artifacts
-skills-lock.json
-.claude
+# ─────────────────────────────────────────────────────────────────────────────
+# DOCKER
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Git worktrees
+# Docker volumes (persistent data)
+docker-compose.override.yml
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IDE & TOOLS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Claude Code / AI tools
+.claude/
+.skills-lock.json
 .worktrees/
+.serena/
+
+# VS Code
+.vscode/
+*.swp
+*.swo
+
+# PyCharm
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGS & TEMPORARY FILES
+# ─────────────────────────────────────────────────────────────────────────────
+
+*.log
+logs/
+*/logs/
+*.tmp
+*.temp
+temp/
+*/temp/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SYSTEM FILES
+# ─────────────────────────────────────────────────────────────────────────────
+
+.DS_Store
+Thumbs.db
+*.icloud
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LEGACY & MISCELLANEOUS
+# ─────────────────────────────────────────────────────────────────────────────
 
 .git_old/
+.git.corrupted-backup/
+.gitattributes
+notes/
+*.bak
+*~
+.claude
