@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from spotipy import Spotify
+from spotipy import Spotify, SpotifyException
 from spotipy.oauth2 import SpotifyOAuth
 
 logging.basicConfig(
@@ -17,14 +17,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
 CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
 REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'https://localhost:8888/callback')
 BACKUP_DIR = os.getenv('BACKUP_DIR', '/data/backup')
 CACHE_PATH = os.getenv('CACHE_PATH', '/data/.cache')
 
-# Spotify scopes needed
 SCOPES = [
     'user-read-private',
     'user-read-email',
@@ -37,26 +35,36 @@ SCOPES = [
 
 
 def get_spotify_client():
-    """Initialize Spotify client with OAuth."""
     if not os.path.exists(CACHE_PATH):
         raise RuntimeError(
             f"No Spotify token cache found at {CACHE_PATH}. "
             "Run auth_helper.py on the host machine first, then restart this container."
         )
-    scope = ' '.join(SCOPES)
     auth_manager = SpotifyOAuth(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
         redirect_uri=REDIRECT_URI,
-        scope=scope,
+        scope=' '.join(SCOPES),
         cache_path=CACHE_PATH,
         open_browser=False,
     )
-    return Spotify(auth_manager=auth_manager)
+    return Spotify(auth_manager=auth_manager, retries=0)
+
+
+def _next_page(sp, results):
+    """Advance to next page, returning None on rate-limit or error."""
+    if not results.get('next'):
+        return None
+    try:
+        return sp.next(results)
+    except SpotifyException as e:
+        if e.http_status == 429:
+            raise
+        logger.warning(f"Pagination error (skipping): {e}")
+        return None
 
 
 def backup_profile(sp):
-    """Backup user profile."""
     logger.info("Backing up profile...")
     profile = sp.current_user()
     return {
@@ -70,201 +78,195 @@ def backup_profile(sp):
     }
 
 
-def backup_playlists(sp):
-    """Backup all playlists with tracks."""
+def _fetch_playlist_tracks(sp, playlist_id, playlist_name):
+    """Fetch tracks for a playlist we own. Returns list of track dicts."""
+    tracks = []
+    try:
+        results = sp.playlist_items(playlist_id)
+        while results:
+            for item in (results.get('items') or []):
+                track = item.get('track') if item else None
+                if not track or not track.get('id'):
+                    continue
+                tracks.append({
+                    'id': track.get('id'),
+                    'name': track.get('name'),
+                    'artists': [{'id': a.get('id'), 'name': a.get('name')} for a in track.get('artists', [])],
+                    'album': {
+                        'id': track.get('album', {}).get('id'),
+                        'name': track.get('album', {}).get('name'),
+                        'release_date': track.get('album', {}).get('release_date'),
+                    },
+                    'duration_ms': track.get('duration_ms'),
+                    'popularity': track.get('popularity'),
+                    'uri': track.get('uri'),
+                })
+            results = _next_page(sp, results)
+    except SpotifyException as e:
+        if e.http_status == 429:
+            raise
+        logger.warning(f"Could not fetch tracks for '{playlist_name}' (skipped): {e}")
+    return tracks
+
+
+def backup_playlists(sp, user_id):
+    """
+    Backup playlists.
+    For playlists owned by the user: fetch full track list.
+    For followed playlists: save metadata only (avoids 403s and rate-limit abuse).
+    """
     logger.info("Backing up playlists...")
     playlists = []
     results = sp.current_user_playlists()
-    
+
     while results:
-        for playlist in results['items']:
-            # Get tracks for each playlist
-            tracks = []
-            track_results = sp.playlist_items(playlist['id'])
-            while track_results:
-                for item in track_results['items']:
-                    if item['track']:
-                        track = item['track']
-                        tracks.append({
-                            'id': track['id'],
-                            'name': track['name'],
-                            'artists': [{'id': a['id'], 'name': a['name']} for a in track['artists']],
-                            'album': {
-                                'id': track['album']['id'],
-                                'name': track['album']['name'],
-                                'release_date': track['album'].get('release_date'),
-                            },
-                            'duration_ms': track['duration_ms'],
-                            'popularity': track['popularity'],
-                            'uri': track['uri'],
-                        })
-                if track_results['next']:
-                    track_results = sp.next(track_results)
-                else:
-                    track_results = None
-            
+        for playlist in (results.get('items') or []):
+            if not playlist:
+                continue
+            owner_id = playlist.get('owner', {}).get('id')
+            is_mine = owner_id == user_id
+            tracks = _fetch_playlist_tracks(sp, playlist['id'], playlist.get('name')) if is_mine else []
             playlists.append({
-                'id': playlist['id'],
-                'name': playlist['name'],
-                'description': playlist['description'],
-                'owner': playlist['owner']['id'],
-                'collaborative': playlist['collaborative'],
-                'public': playlist['public'],
-                'tracks_count': playlist['tracks']['total'],
+                'id': playlist.get('id'),
+                'name': playlist.get('name'),
+                'description': playlist.get('description'),
+                'owner': owner_id,
+                'mine': is_mine,
+                'collaborative': playlist.get('collaborative'),
+                'public': playlist.get('public'),
+                'tracks_count': playlist.get('tracks', {}).get('total', len(tracks)),
                 'tracks': tracks,
             })
-        
-        if results['next']:
-            results = sp.next(results)
-        else:
-            results = None
-    
+
+        results = _next_page(sp, results)
+
     return playlists
 
 
 def backup_liked_tracks(sp):
-    """Backup liked tracks."""
     logger.info("Backing up liked tracks...")
     tracks = []
     results = sp.current_user_saved_tracks()
-    
+
     while results:
-        for item in results['items']:
-            track = item['track']
+        for item in (results.get('items') or []):
+            track = item.get('track') if item else None
+            if not track or not track.get('id'):
+                continue
             tracks.append({
-                'id': track['id'],
-                'name': track['name'],
-                'artists': [{'id': a['id'], 'name': a['name']} for a in track['artists']],
+                'id': track.get('id'),
+                'name': track.get('name'),
+                'artists': [{'id': a.get('id'), 'name': a.get('name')} for a in track.get('artists', [])],
                 'album': {
-                    'id': track['album']['id'],
-                    'name': track['album']['name'],
-                    'release_date': track['album'].get('release_date'),
+                    'id': track.get('album', {}).get('id'),
+                    'name': track.get('album', {}).get('name'),
+                    'release_date': track.get('album', {}).get('release_date'),
                 },
-                'duration_ms': track['duration_ms'],
-                'popularity': track['popularity'],
-                'added_at': item['added_at'],
-                'uri': track['uri'],
+                'duration_ms': track.get('duration_ms'),
+                'popularity': track.get('popularity'),
+                'added_at': item.get('added_at'),
+                'uri': track.get('uri'),
             })
-        
-        if results['next']:
-            results = sp.next(results)
-        else:
-            results = None
-    
+        results = _next_page(sp, results)
+
     return tracks
 
 
 def backup_saved_albums(sp):
-    """Backup saved albums."""
     logger.info("Backing up saved albums...")
     albums = []
     results = sp.current_user_saved_albums()
-    
+
     while results:
-        for item in results['items']:
-            album = item['album']
+        for item in (results.get('items') or []):
+            album = item.get('album') if item else None
+            if not album:
+                continue
             albums.append({
-                'id': album['id'],
-                'name': album['name'],
-                'artists': [{'id': a['id'], 'name': a['name']} for a in album['artists']],
+                'id': album.get('id'),
+                'name': album.get('name'),
+                'artists': [{'id': a.get('id'), 'name': a.get('name')} for a in album.get('artists', [])],
                 'release_date': album.get('release_date'),
-                'album_type': album['album_type'],
-                'total_tracks': album['total_tracks'],
+                'album_type': album.get('album_type'),
+                'total_tracks': album.get('total_tracks'),
                 'images': album.get('images'),
-                'added_at': item['added_at'],
+                'added_at': item.get('added_at'),
             })
-        
-        if results['next']:
-            results = sp.next(results)
-        else:
-            results = None
-    
+        results = _next_page(sp, results)
+
     return albums
 
 
 def backup_followed_artists(sp):
-    """Backup followed artists."""
     logger.info("Backing up followed artists...")
     artists = []
     results = sp.current_user_followed_artists()
-    
+
     while results:
-        for artist in results['artists']['items']:
+        for artist in (results.get('artists', {}).get('items') or []):
+            if not artist:
+                continue
             artists.append({
-                'id': artist['id'],
-                'name': artist['name'],
+                'id': artist.get('id'),
+                'name': artist.get('name'),
                 'popularity': artist.get('popularity'),
                 'genres': artist.get('genres', []),
                 'images': artist.get('images'),
-                'uri': artist['uri'],
+                'uri': artist.get('uri'),
             })
-        
-        if results['artists']['next']:
-            results = sp.current_user_followed_artists(after=results['artists']['cursors']['after'])
+        cursor = results.get('artists', {})
+        if cursor.get('next'):
+            after = cursor.get('cursors', {}).get('after')
+            results = sp.current_user_followed_artists(after=after)
         else:
             results = None
-    
+
     return artists
 
 
 def save_backup(data):
-    """Save backup to JSON file."""
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    
     timestamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
     filename = os.path.join(BACKUP_DIR, f'spotify_backup_{timestamp}.json')
-    
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    
     logger.info(f"Backup saved to {filename}")
-    
-    # Remove old backups, keep only latest
     backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith('spotify_backup_') and f.endswith('.json')])
     for old in backups[:-1]:
-        old_path = os.path.join(BACKUP_DIR, old)
-        os.remove(old_path)
+        os.remove(os.path.join(BACKUP_DIR, old))
         logger.info(f"Removed old backup: {old}")
-    
     return filename
 
 
 def main():
     logger.info("Starting Spotify backup...")
-    
-    # Check credentials
     if not CLIENT_ID or not CLIENT_SECRET:
         logger.error("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are required")
         return
-    
-    try:
-        sp = get_spotify_client()
-        
-        # Run all backups
-        backup_data = {
-            'timestamp': datetime.now().isoformat(),
-            'profile': backup_profile(sp),
-            'playlists': backup_playlists(sp),
-            'liked_tracks': backup_liked_tracks(sp),
-            'saved_albums': backup_saved_albums(sp),
-            'followed_artists': backup_followed_artists(sp),
-        }
-        
-        # Save to file
-        save_backup(backup_data)
-        
-        logger.info("Backup complete!")
-        
-        # Log summary
-        logger.info(f"  - Profile: {backup_data['profile']['display_name']}")
-        logger.info(f"  - Playlists: {len(backup_data['playlists'])}")
-        logger.info(f"  - Liked tracks: {len(backup_data['liked_tracks'])}")
-        logger.info(f"  - Saved albums: {len(backup_data['saved_albums'])}")
-        logger.info(f"  - Followed artists: {len(backup_data['followed_artists'])}")
-        
-    except Exception as e:
-        logger.error(f"Backup failed: {e}")
-        raise
+
+    sp = get_spotify_client()
+    profile = backup_profile(sp)
+    user_id = profile['id']
+    logger.info(f"Authenticated as: {profile.get('display_name')} ({user_id})")
+
+    backup_data = {
+        'timestamp': datetime.now().isoformat(),
+        'profile': profile,
+        'playlists': backup_playlists(sp, user_id),
+        'liked_tracks': backup_liked_tracks(sp),
+        'saved_albums': backup_saved_albums(sp),
+        'followed_artists': backup_followed_artists(sp),
+    }
+
+    save_backup(backup_data)
+
+    own = sum(1 for p in backup_data['playlists'] if p.get('mine'))
+    logger.info("Backup complete!")
+    logger.info(f"  - Profile: {profile.get('display_name')}")
+    logger.info(f"  - Playlists: {len(backup_data['playlists'])} ({own} own, {len(backup_data['playlists']) - own} followed — tracks only for own)")
+    logger.info(f"  - Liked tracks: {len(backup_data['liked_tracks'])}")
+    logger.info(f"  - Saved albums: {len(backup_data['saved_albums'])}")
+    logger.info(f"  - Followed artists: {len(backup_data['followed_artists'])}")
 
 
 if __name__ == '__main__':
