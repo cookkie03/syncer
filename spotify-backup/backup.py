@@ -38,6 +38,11 @@ SCOPES = [
 
 def get_spotify_client():
     """Initialize Spotify client with OAuth."""
+    if not os.path.exists(CACHE_PATH):
+        raise RuntimeError(
+            f"No Spotify token cache found at {CACHE_PATH}. "
+            "Run auth_helper.py on the host machine first, then restart this container."
+        )
     scope = ' '.join(SCOPES)
     auth_manager = SpotifyOAuth(
         client_id=CLIENT_ID,
@@ -45,6 +50,7 @@ def get_spotify_client():
         redirect_uri=REDIRECT_URI,
         scope=scope,
         cache_path=CACHE_PATH,
+        open_browser=False,
     )
     return Spotify(auth_manager=auth_manager)
 

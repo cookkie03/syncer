@@ -30,7 +30,10 @@ import time
 from pathlib import Path
 
 CLIENT_ID = 'e8c6512e5dc14d47b0e86afa18c86b50'
-CACHE_PATH = os.path.expanduser('~/syncer_prod/spotify-backup/data/.cache')
+# Default: save next to this script so the Docker volume mount picks it up automatically.
+# Override with CACHE_PATH env var if needed.
+_script_dir = Path(__file__).parent
+CACHE_PATH = os.environ.get('CACHE_PATH', str(_script_dir / 'data' / '.cache'))
 
 SCOPES = [
     'user-read-private',
