@@ -24,6 +24,8 @@ credentials.json
 *.p12
 *.pfx
 *.keytab
+client_secret*.json
+*.apps.googleusercontent.com.json
 
 # Token files (OAuth, API tokens, etc.)
 *token/
@@ -34,6 +36,7 @@ credentials.json
 
 # Generated config files with credentials
 vdirsyncer-authorize.cfg
+config/calendar-map.json
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RUNTIME STATE & SYNCHRONIZATION DATA
@@ -78,8 +81,6 @@ backup/
 *.backup
 *_backup/
 **/backup/*
-!caldav-backup/backup/*.ics
-!notion-backup/backup/*.zip
 
 # CardDAV VCF backups
 carddav-google-contacts/backup/*.vcf
