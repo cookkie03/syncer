@@ -14,6 +14,30 @@ x-dns-hosts: &dns-hosts
 
 services:
 
+  # ── spotify-backup: headless Spotify mirror backup ────────────────────────
+  spotify-backup:
+    build:
+      context: ./spotify-backup
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/spotify-backup:local
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./spotify-backup/data:/data
+      - ./spotify-backup/logs:/logs
+    environment:
+      - BACKUP_INTERVAL_MINUTES=240
+      - BACKUP_DIR=/data/backup
+      - CACHE_PATH=/data/.cache
+      - LOG_DIR=/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import spotipy, requests; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   # ── vdirsyncer: CalDAV → Google Calendar ──────────────────────────────────
   vdirsyncer:
     build:

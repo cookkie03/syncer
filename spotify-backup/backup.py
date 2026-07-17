@@ -23,6 +23,7 @@ CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
 REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'https://localhost:8888/callback')
 BACKUP_DIR = os.getenv('BACKUP_DIR', '/data/backup')
 CACHE_PATH = os.getenv('CACHE_PATH', '/data/.cache')
+CURRENT_BACKUP_NAME = 'spotify_backup_current.json'
 
 # Spotify scopes needed
 SCOPES = [
@@ -45,6 +46,7 @@ def get_spotify_client():
         redirect_uri=REDIRECT_URI,
         scope=scope,
         cache_path=CACHE_PATH,
+        open_browser=False,
     )
     return Spotify(auth_manager=auth_manager)
 
@@ -204,36 +206,36 @@ def backup_followed_artists(sp):
 def save_backup(data):
     """Save backup to JSON file."""
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
-    filename = os.path.join(BACKUP_DIR, f'spotify_backup_{timestamp}.json')
-    
-    with open(filename, 'w', encoding='utf-8') as f:
+
+    filename = os.path.join(BACKUP_DIR, CURRENT_BACKUP_NAME)
+    temp_path = f'{filename}.tmp'
+
+    with open(temp_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    
+
+    os.replace(temp_path, filename)
     logger.info(f"Backup saved to {filename}")
-    
-    # Remove old backups, keep only latest
-    backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith('spotify_backup_') and f.endswith('.json')])
-    for old in backups[:-1]:
-        old_path = os.path.join(BACKUP_DIR, old)
-        os.remove(old_path)
-        logger.info(f"Removed old backup: {old}")
-    
     return filename
 
 
 def main():
     logger.info("Starting Spotify backup...")
-    
+
     # Check credentials
     if not CLIENT_ID or not CLIENT_SECRET:
         logger.error("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are required")
-        return
-    
+        return 1
+
+    if not os.path.exists(CACHE_PATH):
+        logger.error(
+            "OAuth cache not found at %s. Run spotify-backup/auth_helper.py externally first.",
+            CACHE_PATH,
+        )
+        return 1
+
     try:
         sp = get_spotify_client()
-        
+
         # Run all backups
         backup_data = {
             'timestamp': datetime.now().isoformat(),
@@ -255,11 +257,13 @@ def main():
         logger.info(f"  - Liked tracks: {len(backup_data['liked_tracks'])}")
         logger.info(f"  - Saved albums: {len(backup_data['saved_albums'])}")
         logger.info(f"  - Followed artists: {len(backup_data['followed_artists'])}")
-        
+
     except Exception as e:
         logger.error(f"Backup failed: {e}")
-        raise
+        return 1
+
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
