@@ -1,10 +1,14 @@
-#!/bin/sh
-set -e
+#!/bin/bash
+set -euo pipefail
 
 CRONTAB_FILE="/tmp/spotify-backup.cron"
+LOG_DIR="${LOG_DIR:-/logs}"
+BACKUP_DIR="${BACKUP_DIR:-/data/backup}"
+LOG_FILE="${LOG_FILE:-$LOG_DIR/spotify-backup.log}"
 
-# Create backup directory if it doesn't exist
-mkdir -p /data/backup
+mkdir -p "$LOG_DIR" "$BACKUP_DIR"
+touch "$LOG_FILE"
+exec > >(tee -a "$LOG_FILE") 2>&1
 
 # Validate required environment variables
 : "${SPOTIFY_CLIENT_ID:?SPOTIFY_CLIENT_ID is required}"
@@ -19,7 +23,7 @@ if [ "$BACKUP_INTERVAL_MINUTES" -lt 60 ]; then
     CRON_EXPRESSION="*/${BACKUP_INTERVAL_MINUTES} * * * *"
 elif [ "$((BACKUP_INTERVAL_MINUTES % 1440))" -eq 0 ]; then
     DAYS=$((BACKUP_INTERVAL_MINUTES / 1440))
-    CRON_EXPRESSION="0 ${DAYS:-1} * * *"
+    CRON_EXPRESSION="0 0 */${DAYS:-1} * *"
 elif [ "$((BACKUP_INTERVAL_MINUTES % 60))" -eq 0 ]; then
     HOURS=$((BACKUP_INTERVAL_MINUTES / 60))
     if [ "$HOURS" -le 23 ]; then
@@ -34,6 +38,6 @@ fi
 echo "[entrypoint] Running initial backup..."
 python /app/backup.py || echo "[entrypoint] WARNING: initial backup failed — will retry on schedule"
 
-echo "$CRON_EXPRESSION python /app/backup.py 2>&1" > "$CRONTAB_FILE"
+echo "$CRON_EXPRESSION python /app/backup.py" > "$CRONTAB_FILE"
 echo "[entrypoint] Scheduling backup with expression: $CRON_EXPRESSION via supercronic"
 exec supercronic "$CRONTAB_FILE"

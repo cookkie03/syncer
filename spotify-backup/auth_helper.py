@@ -29,8 +29,9 @@ import json
 import time
 from pathlib import Path
 
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_DIR / 'data'
 CLIENT_ID = 'e8c6512e5dc14d47b0e86afa18c86b50'
-CACHE_PATH = os.path.expanduser('~/syncer_prod/spotify-backup/data/.cache')
 
 SCOPES = [
     'user-read-private',
@@ -46,6 +47,21 @@ SCOPES = [
 # Spotify requires http://127.0.0.1 (not http://localhost) for local redirect URIs.
 # Override via SPOTIFY_REDIRECT_URI env var for tunnel mode (e.g. https://xxx.localhost.run/callback).
 DEFAULT_REDIRECT_URI = 'http://127.0.0.1:9000/callback'
+
+
+def default_cache_path() -> Path:
+    """Return the portable cache path stored inside the repo."""
+    return DATA_DIR / '.cache'
+
+
+def resolved_cache_path() -> Path:
+    """Allow overrides while defaulting to the repo-local cache path."""
+    return Path(os.environ.get('SPOTIFY_CACHE_PATH', default_cache_path()))
+
+
+def should_open_browser() -> bool:
+    """Open a local browser only when explicitly requested."""
+    return os.environ.get('SPOTIFY_AUTH_OPEN_BROWSER', '').lower() in {'1', 'true', 'yes'}
 
 
 def generate_code_verifier(length: int = 128) -> str:
@@ -115,11 +131,12 @@ class CallbackHandler(BaseHTTPRequestHandler):
             return
 
         token_data = resp.json()
+        cache_path = resolved_cache_path()
 
         # Save token
-        os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         token_data['expires_at'] = token_data.get('expires_in', 3600) + int(time.time())
-        with open(CACHE_PATH, 'w') as f:
+        with open(cache_path, 'w', encoding='utf-8') as f:
             json.dump({
                 'access_token': token_data['access_token'],
                 'token_type': token_data.get('token_type', 'Bearer'),
@@ -138,7 +155,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
             b'<p>You can close this window and return to the terminal.</p>'
             b'</body></html>'
         )
-        print(f"\nToken saved to: {CACHE_PATH}")
+        print(f"\nToken saved to: {cache_path}")
         CallbackHandler.auth_success = True
 
     def log_message(self, format, *args):
@@ -189,8 +206,11 @@ def main():
     }
     auth_url = 'https://accounts.spotify.com/authorize?' + urlencode(auth_params)
 
-    print(f"1. Opening browser for Spotify login...")
-    webbrowser.open(auth_url)
+    print("1. Open this URL in a browser on any device that can reach Spotify:")
+    print(auth_url)
+    if should_open_browser():
+        print("\nOpening local browser because SPOTIFY_AUTH_OPEN_BROWSER is enabled...")
+        webbrowser.open(auth_url)
 
     print(f"2. Waiting for callback on {redirect_uri} ...")
     server.handle_request()
@@ -202,7 +222,7 @@ def main():
         print("\nAuth failed!")
         sys.exit(1)
 
-    print(f"Token location: {CACHE_PATH}")
+    print(f"Token location: {resolved_cache_path()}")
 
 
 if __name__ == '__main__':
