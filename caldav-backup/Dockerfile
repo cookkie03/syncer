@@ -7,12 +7,13 @@ RUN pip install --no-cache-dir caldav
 
 # Copy backup script
 COPY backup.py .
+COPY entrypoint.sh .
 
 # Create output directory
-RUN mkdir -p /backup
+RUN mkdir -p /backup /logs
 
 # Make script executable
-RUN chmod +x backup.py
+RUN chmod +x backup.py entrypoint.sh
 
 # Entry point
-ENTRYPOINT ["python", "backup.py"]
+ENTRYPOINT ["/app/entrypoint.sh"]

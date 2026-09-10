@@ -8,8 +8,9 @@ echo "======================================"
 echo "Google OAuth Token Regenerator"
 echo "======================================"
 echo ""
-echo "This script will regenerate the Google OAuth token"
-echo "for the new device (needed after container migration)."
+echo "This script will regenerate Google OAuth tokens"
+echo "using an external browser flow suitable for headless hosts."
+echo "It authorizes Google Calendar and Google Contacts only."
 echo ""
 
 # Check if .env exists (in parent dir or config/)
@@ -44,13 +45,17 @@ if [ -f "$ENV_FILE" ]; then
     done < "$ENV_FILE"
 fi
 
-if [ -z "$GOOGLE_CLIENT_ID" ] || [ -z "$GOOGLE_CLIENT_SECRET" ]; then
-    echo "❌ Error: GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not set in .env"
+DEVICE_CLIENT_ID="${GOOGLE_DEVICE_CLIENT_ID:-}"
+DEVICE_CLIENT_SECRET="${GOOGLE_DEVICE_CLIENT_SECRET:-}"
+
+if [ -z "$DEVICE_CLIENT_ID" ] || [ -z "$DEVICE_CLIENT_SECRET" ]; then
+    echo "❌ Error: missing headless Google OAuth credentials in .env"
+    echo "   Set GOOGLE_DEVICE_CLIENT_ID and GOOGLE_DEVICE_CLIENT_SECRET."
     exit 1
 fi
 
-echo "✓ Found credentials in .env"
-echo "  Client ID: ${GOOGLE_CLIENT_ID:0:20}..."
+echo "✓ Found dedicated device-flow credentials in .env"
+echo "  Client ID: ${DEVICE_CLIENT_ID:0:20}..."
 echo ""
 
 # Create token directory if not exists (in parent dir)
@@ -64,12 +69,13 @@ fi
 
 echo ""
 echo "======================================"
-echo "Starting OAuth authorization..."
+echo "Starting external-browser OAuth authorization..."
 echo "======================================"
 echo ""
 
-# Get script directory for running authorize-device.py
+# Get script and project directories for running authorize-device.py
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Run Python authorization
 if command -v python3 &> /dev/null; then
@@ -79,12 +85,12 @@ elif command -v python &> /dev/null; then
 else
     echo "❌ Python not found. Trying with Docker..."
     docker run --rm -it \
-        -v "$SCRIPT_DIR:/workspace" \
+        -v "$PROJECT_DIR:/workspace" \
         -w /workspace \
-        -e GOOGLE_CLIENT_ID \
-        -e GOOGLE_CLIENT_SECRET \
+        -e GOOGLE_DEVICE_CLIENT_ID \
+        -e GOOGLE_DEVICE_CLIENT_SECRET \
         python:3.11-slim \
-        python authorize-device.py
+        python auth/authorize-device.py
 fi
 
 echo ""
@@ -93,10 +99,8 @@ echo "Token regeneration complete!"
 echo "======================================"
 echo ""
 echo "Next steps:"
-echo "1. Rebuild the vdirsyncer container:"
-echo "   docker-compose down"
-echo "   docker-compose build --no-cache vdirsyncer"
-echo "   docker-compose up -d vdirsyncer"
+echo "1. Recreate the containers that use Google tokens:"
+echo "   docker compose up -d --force-recreate vdirsyncer google-contacts-backup"
 echo ""
 echo "2. Check logs:"
-echo "   docker-compose logs -f vdirsyncer"
+echo "   docker compose logs -f vdirsyncer google-contacts-backup"

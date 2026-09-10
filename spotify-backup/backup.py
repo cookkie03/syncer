@@ -71,10 +71,9 @@ def backup_playlists(sp):
     logger.info("Backing up playlists...")
     playlists = []
     results = sp.current_user_playlists()
-    
+
     while results:
         for playlist in results['items']:
-            # Get tracks for each playlist
             tracks = []
             track_results = sp.playlist_items(playlist['id'])
             while track_results:
@@ -98,7 +97,7 @@ def backup_playlists(sp):
                     track_results = sp.next(track_results)
                 else:
                     track_results = None
-            
+
             playlists.append({
                 'id': playlist['id'],
                 'name': playlist['name'],
@@ -109,12 +108,12 @@ def backup_playlists(sp):
                 'tracks_count': playlist['tracks']['total'],
                 'tracks': tracks,
             })
-        
+
         if results['next']:
             results = sp.next(results)
         else:
             results = None
-    
+
     return playlists
 
 
@@ -123,7 +122,7 @@ def backup_liked_tracks(sp):
     logger.info("Backing up liked tracks...")
     tracks = []
     results = sp.current_user_saved_tracks()
-    
+
     while results:
         for item in results['items']:
             track = item['track']
@@ -141,12 +140,12 @@ def backup_liked_tracks(sp):
                 'added_at': item['added_at'],
                 'uri': track['uri'],
             })
-        
+
         if results['next']:
             results = sp.next(results)
         else:
             results = None
-    
+
     return tracks
 
 
@@ -155,7 +154,7 @@ def backup_saved_albums(sp):
     logger.info("Backing up saved albums...")
     albums = []
     results = sp.current_user_saved_albums()
-    
+
     while results:
         for item in results['items']:
             album = item['album']
@@ -169,12 +168,12 @@ def backup_saved_albums(sp):
                 'images': album.get('images'),
                 'added_at': item['added_at'],
             })
-        
+
         if results['next']:
             results = sp.next(results)
         else:
             results = None
-    
+
     return albums
 
 
@@ -183,7 +182,7 @@ def backup_followed_artists(sp):
     logger.info("Backing up followed artists...")
     artists = []
     results = sp.current_user_followed_artists()
-    
+
     while results:
         for artist in results['artists']['items']:
             artists.append({
@@ -194,12 +193,12 @@ def backup_followed_artists(sp):
                 'images': artist.get('images'),
                 'uri': artist['uri'],
             })
-        
+
         if results['artists']['next']:
             results = sp.current_user_followed_artists(after=results['artists']['cursors']['after'])
         else:
             results = None
-    
+
     return artists
 
 
@@ -221,7 +220,6 @@ def save_backup(data):
 def main():
     logger.info("Starting Spotify backup...")
 
-    # Check credentials
     if not CLIENT_ID or not CLIENT_SECRET:
         logger.error("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are required")
         return 1
@@ -236,7 +234,6 @@ def main():
     try:
         sp = get_spotify_client()
 
-        # Run all backups
         backup_data = {
             'timestamp': datetime.now().isoformat(),
             'profile': backup_profile(sp),
@@ -245,19 +242,15 @@ def main():
             'saved_albums': backup_saved_albums(sp),
             'followed_artists': backup_followed_artists(sp),
         }
-        
-        # Save to file
+
         save_backup(backup_data)
-        
+
         logger.info("Backup complete!")
-        
-        # Log summary
         logger.info(f"  - Profile: {backup_data['profile']['display_name']}")
         logger.info(f"  - Playlists: {len(backup_data['playlists'])}")
         logger.info(f"  - Liked tracks: {len(backup_data['liked_tracks'])}")
         logger.info(f"  - Saved albums: {len(backup_data['saved_albums'])}")
         logger.info(f"  - Followed artists: {len(backup_data['followed_artists'])}")
-
     except Exception as e:
         logger.error(f"Backup failed: {e}")
         return 1

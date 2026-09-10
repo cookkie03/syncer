@@ -30,7 +30,11 @@ COPY config.template /app/config.template
 COPY entrypoint.sh /app/entrypoint.sh
 COPY sync-notify.sh /app/sync-notify.sh
 COPY sync_wrapper.py /app/sync_wrapper.py
-RUN chmod +x /app/entrypoint.sh /app/sync-notify.sh
+COPY sync_filters.py /app/sync_filters.py
+COPY render_config.py /app/render_config.py
+COPY refresh_pairing.py /app/refresh_pairing.py
+COPY bootstrap.sh /app/bootstrap.sh
+RUN chmod +x /app/entrypoint.sh /app/sync-notify.sh /app/bootstrap.sh
 
 # Vdirsyncer config and status directories
 RUN mkdir -p /data/status /data/token

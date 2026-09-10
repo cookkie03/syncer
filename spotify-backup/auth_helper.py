@@ -23,7 +23,7 @@ import secrets
 import ssl
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 import requests
 import json
 import time
@@ -64,6 +64,81 @@ def should_open_browser() -> bool:
     return os.environ.get('SPOTIFY_AUTH_OPEN_BROWSER', '').lower() in {'1', 'true', 'yes'}
 
 
+def normalize_callback_url(callback_url: str) -> str:
+    """Accept copied loopback URLs with or without scheme."""
+    callback_url = callback_url.strip()
+    if callback_url.startswith(('http://', 'https://')):
+        return callback_url
+    if callback_url.startswith(('127.0.0.1', 'localhost')):
+        return f'http://{callback_url}'
+    return callback_url
+
+
+def extract_callback_params(callback_url: str) -> dict[str, str | None]:
+    """Extract auth response parameters from a pasted callback URL."""
+    parsed = urlparse(normalize_callback_url(callback_url))
+    params = parse_qs(parsed.query)
+    return {
+        'code': params.get('code', [None])[0],
+        'error': params.get('error', [None])[0],
+    }
+
+
+def write_token_cache(token_data: dict) -> Path:
+    """Persist the OAuth token cache inside the repo."""
+    cache_path = resolved_cache_path()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    token_data['expires_at'] = token_data.get('expires_in', 3600) + int(time.time())
+    with open(cache_path, 'w', encoding='utf-8') as f:
+        json.dump({
+            'access_token': token_data['access_token'],
+            'token_type': token_data.get('token_type', 'Bearer'),
+            'expires_in': token_data.get('expires_in', 3600),
+            'expires_at': token_data.get('expires_at'),
+            'refresh_token': token_data.get('refresh_token'),
+            'scope': ' '.join(SCOPES),
+        }, f, indent=2)
+    return cache_path
+
+
+def exchange_code_for_token(code: str, code_verifier: str, redirect_uri: str) -> Path:
+    """Exchange an authorization code and persist the resulting token."""
+    token_url = 'https://accounts.spotify.com/api/token'
+    data = {
+        'client_id': CLIENT_ID,
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+        'code_verifier': code_verifier,
+    }
+
+    resp = requests.post(token_url, data=data)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Token request failed: {resp.text}")
+
+    return write_token_cache(resp.json())
+
+
+def handle_callback_result(code: str | None, error: str | None, code_verifier: str, redirect_uri: str) -> bool:
+    """Handle a callback result from either HTTP listener or pasted URL."""
+    if error:
+        print(f"\nAuthorization error: {error}")
+        return False
+
+    if not code:
+        print("\nAuthorization error: no code received")
+        return False
+
+    try:
+        cache_path = exchange_code_for_token(code, code_verifier, redirect_uri)
+    except Exception as exc:
+        print(exc)
+        return False
+
+    print(f"\nToken saved to: {cache_path}")
+    return True
+
+
 def generate_code_verifier(length: int = 128) -> str:
     """Generate a random PKCE code verifier (43-128 chars)."""
     return secrets.token_urlsafe(length)[:length]
@@ -84,14 +159,15 @@ class CallbackHandler(BaseHTTPRequestHandler):
     auth_success = False
 
     def do_GET(self):
-        from urllib.parse import parse_qs
-        query = urlparse(self.path).query
-        params = parse_qs(query)
+        params = extract_callback_params(self.path)
+        success = handle_callback_result(
+            params['code'],
+            params['error'],
+            CallbackHandler.code_verifier,
+            CallbackHandler.redirect_uri,
+        )
 
-        code = params.get('code', [None])[0]
-        error = params.get('error', [None])[0]
-
-        if error:
+        if not success:
             self.send_response(400)
             self.send_header('Content-Type', 'text/html')
             self.end_headers()
@@ -101,50 +177,8 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 b'<p>You can close this window.</p>'
                 b'</body></html>'
             )
-            print(f"\nAuthorization error: {error}")
             CallbackHandler.auth_success = False
             return
-
-        if not code:
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b'Error: no code received')
-            return
-
-        # Exchange authorization code for access token
-        token_url = 'https://accounts.spotify.com/api/token'
-        data = {
-            'client_id': CLIENT_ID,
-            'grant_type': 'authorization_code',
-            'code': code,
-            'redirect_uri': CallbackHandler.redirect_uri,
-            'code_verifier': CallbackHandler.code_verifier,
-        }
-
-        resp = requests.post(token_url, data=data)
-        if resp.status_code != 200:
-            print(f"Token request failed: {resp.text}")
-            CallbackHandler.auth_success = False
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b'Error exchanging code for token')
-            return
-
-        token_data = resp.json()
-        cache_path = resolved_cache_path()
-
-        # Save token
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        token_data['expires_at'] = token_data.get('expires_in', 3600) + int(time.time())
-        with open(cache_path, 'w', encoding='utf-8') as f:
-            json.dump({
-                'access_token': token_data['access_token'],
-                'token_type': token_data.get('token_type', 'Bearer'),
-                'expires_in': token_data.get('expires_in', 3600),
-                'expires_at': token_data.get('expires_at'),
-                'refresh_token': token_data.get('refresh_token'),
-                'scope': ' '.join(SCOPES),
-            }, f, indent=2)
 
         self.send_response(200)
         self.send_header('Content-Type', 'text/html')
@@ -155,7 +189,6 @@ class CallbackHandler(BaseHTTPRequestHandler):
             b'<p>You can close this window and return to the terminal.</p>'
             b'</body></html>'
         )
-        print(f"\nToken saved to: {cache_path}")
         CallbackHandler.auth_success = True
 
     def log_message(self, format, *args):
@@ -169,14 +202,6 @@ def main():
     parsed = urlparse(redirect_uri)
     is_https = parsed.scheme == 'https'
     is_localhost = parsed.hostname in ('localhost', '127.0.0.1')
-
-    # ── Local port to listen on ──────────────────────────────────────
-    # Extract port from redirect_uri, or use SPOTIFY_AUTH_PORT, or default 9000
-    listen_port = int(os.environ.get('SPOTIFY_AUTH_PORT', parsed.port or 9000))
-
-    # ── Server setup ─────────────────────────────────────────────────
-    server = HTTPServer(('localhost', listen_port), CallbackHandler)
-    CallbackHandler.redirect_uri = redirect_uri
 
     print("=" * 50)
     print("Spotify Auth Helper  (PKCE flow)")
@@ -212,7 +237,24 @@ def main():
         print("\nOpening local browser because SPOTIFY_AUTH_OPEN_BROWSER is enabled...")
         webbrowser.open(auth_url)
 
-    print(f"2. Waiting for callback on {redirect_uri} ...")
+    print("\n2. Paste the full callback URL here and press Enter,")
+    print("   or press Enter on an empty line to wait for the callback on this machine.")
+    pasted_callback = input("> ").strip()
+
+    if pasted_callback:
+        params = extract_callback_params(pasted_callback)
+        if handle_callback_result(params['code'], params['error'], code_verifier, redirect_uri):
+            print("\nAuth complete!")
+            print(f"Token location: {resolved_cache_path()}")
+            return
+        print("\nAuth failed!")
+        sys.exit(1)
+
+    listen_port = int(os.environ.get('SPOTIFY_AUTH_PORT', parsed.port or 9000))
+    server = HTTPServer(('localhost', listen_port), CallbackHandler)
+    CallbackHandler.redirect_uri = redirect_uri
+
+    print(f"3. Waiting for callback on {redirect_uri} ...")
     server.handle_request()
     server.server_close()
 

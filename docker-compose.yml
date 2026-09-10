@@ -5,6 +5,7 @@ x-dns-hosts: &dns-hosts
   extra_hosts:
     - "host.docker.internal:host-gateway"
     - "calendar.lucamanca.synology.me:${SYNOLOGY_IP:-79.50.144.75}"
+    - "synologyds224.tail234659.ts.net:${SYNOLOGY_IP:-79.50.144.75}"
     - "api.notion.com:${NOTION_API_IP:-208.103.161.2}"
     - "api.telegram.org:${TELEGRAM_API_IP:-149.154.166.110}"
     - "www.googleapis.com:${GOOGLEAPIS_IP:-192.178.203.95}"
@@ -51,6 +52,16 @@ services:
     volumes:
       - ./vdirsyncer/status:/data/status
       - ./vdirsyncer/token:/data/token
+      - ./vdirsyncer/logs:/logs
+      - ./config/calendar-map.json:/app/calendar-map.json
+    environment:
+      - GOOGLE_CLIENT_ID=${GOOGLE_DEVICE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_DEVICE_CLIENT_SECRET}
+      - LOG_DIR=/logs
+      - CALENDAR_MAP_FILE=/app/calendar-map.json
+      - VDIRSYNCER_RUN_STARTUP_DISCOVER=1
+      - VDIRSYNCER_RUN_STARTUP_SYNC=0
+      - VDIRSYNCER_RUN_SCHEDULE=0
     healthcheck:
       test: ["CMD", "python", "-c", "import vdirsyncer; print('ok')"]
       interval: 5m
@@ -58,50 +69,55 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── vtodo-notion: CalDAV VTODO ↔ Notion Database ──────────────────────────
-  vtodo-notion:
-    build:
-      context: ./vtodo-notion
-      args:
-        TARGETARCH: ${TARGETARCH:-amd64}
-    image: caldav-sync/vtodo-notion:local
-    restart: unless-stopped
-    env_file: .env
-    <<: *dns-hosts
-    volumes:
-      - ./vtodo-notion/state:/data
-      - ./config.yaml:/app/config.yaml:ro
-      - ./shared:/shared:ro
-    healthcheck:
-      test: ["CMD", "python", "-c", "import caldav, notion_client; print('ok')"]
-      interval: 5m
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+  # ── vtodo-notion: temporarily disabled ────────────────────────────────────
+  # vtodo-notion:
+  #   build:
+  #     context: ./vtodo-notion
+  #     args:
+  #       TARGETARCH: ${TARGETARCH:-amd64}
+  #   image: caldav-sync/vtodo-notion:local
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   <<: *dns-hosts
+  #   volumes:
+  #     - ./vtodo-notion/state:/data
+  #     - ./vtodo-notion/logs:/logs
+  #     - ./config/config.yaml:/app/config.yaml:ro
+  #     - ./shared:/shared:ro
+  #   environment:
+  #     - LOG_DIR=/logs
+  #   healthcheck:
+  #     test: ["CMD", "python", "-c", "import caldav, notion_client; print('ok')"]
+  #     interval: 5m
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s
 
-  # ── notion-backup: JSON backup via official Notion API ──────────────────────
-  notion-backup:
-    build:
-      context: ./notion-backup
-      args:
-        TARGETARCH: ${TARGETARCH:-amd64}
-    image: caldav-sync/notion-backup:local
-    restart: unless-stopped
-    env_file: .env
-    <<: *dns-hosts
-    volumes:
-      - ./notion-backup/backup:/backup
-      - ./vdirsyncer/token:/data/token:ro
-      - ./config.yaml:/app/config.yaml:ro
-      - ./shared:/shared:ro
-    environment:
-      - GOOGLE_GMAIL_TOKEN_FILE=/data/token/google_gmail.json
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import requests; print('ok')"]
-      interval: 5m
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+  # ── notion-backup: temporarily disabled ───────────────────────────────────
+  # notion-backup:
+  #   build:
+  #     context: ./notion-backup
+  #     args:
+  #       TARGETARCH: ${TARGETARCH:-amd64}
+  #   image: caldav-sync/notion-backup:local
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   <<: *dns-hosts
+  #   volumes:
+  #     - ./notion-backup/backup:/backup
+  #     - ./notion-backup/logs:/logs
+  #     - ./vdirsyncer/token:/data/token:ro
+  #     - ./config/config.yaml:/app/config.yaml:ro
+  #     - ./shared:/shared:ro
+  #   environment:
+  #     - GOOGLE_GMAIL_TOKEN_FILE=/data/token/google_gmail.json
+  #     - LOG_DIR=/logs
+  #   healthcheck:
+  #     test: ["CMD", "python3", "-c", "import requests; print('ok')"]
+  #     interval: 5m
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s
 
   # ── caldav-backup: backup CalDAV calendars and tasks to ICS ───────────────
   caldav-backup:
@@ -115,10 +131,12 @@ services:
     <<: *dns-hosts
     volumes:
       - ./caldav-backup/backup:/backup
-      - ./config.yaml:/app/config.yaml:ro
+      - ./caldav-backup/logs:/logs
+      - ./config/config.yaml:/app/config.yaml:ro
       - ./shared:/shared:ro
     environment:
       - CALDAV_BACKUP_DIR=/backup
+      - LOG_DIR=/logs
     command: ["--watch", "--interval", "14400"]
     healthcheck:
       test: ["CMD", "python", "-c", "import caldav; print('ok')"]
@@ -127,26 +145,25 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── carddav-google-contacts: Bidirectional Contact Sync ───────────────────
-  carddav-google-contacts:
+  # ── google-contacts-backup: Incremental Google Contacts Backup ────────────
+  google-contacts-backup:
     build:
-      context: ./carddav-google-contacts
+      context: ./google-contacts-backup
       args:
         TARGETARCH: ${TARGETARCH:-amd64}
-    image: caldav-sync/carddav-google-contacts:local
+    image: caldav-sync/google-contacts-backup:local
     restart: unless-stopped
     env_file: .env
     <<: *dns-hosts
     volumes:
-      - ./carddav-google-contacts/state:/data
-      - ./carddav-google-contacts/backup:/data/backup
+      - ./google-contacts-backup/backup:/backup
+      - ./google-contacts-backup/logs:/logs
       - ./vdirsyncer/token:/data/token:ro
-      - ./config.yaml:/app/config.yaml:ro
+      - ./config/config.yaml:/app/config.yaml:ro
       - ./shared:/shared:ro
     environment:
-      - LOG_DIR=/data/logs
-      - DB_FILE=/data/sync_contacts.db
-      - BACKUP_DIR=/data/backup
+      - LOG_DIR=/logs
+      - BACKUP_DIR=/backup
       - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google_contacts.json
     healthcheck:
       test: ["CMD", "python3", "-c", "import googleapiclient, vobject, caldav; print('ok')"]

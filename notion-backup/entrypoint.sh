@@ -1,7 +1,13 @@
-#!/bin/sh
-set -e
+#!/bin/bash
+set -euo pipefail
 
 CRONTAB_FILE="/tmp/notion-backup.cron"
+LOG_DIR="${LOG_DIR:-/logs}"
+LOG_FILE="${LOG_FILE:-$LOG_DIR/notion-backup.log}"
+
+mkdir -p "$LOG_DIR"
+touch "$LOG_FILE"
+exec > >(tee -a "$LOG_FILE") 2>&1
 
 : "${NOTION_TOKEN:?NOTION_TOKEN is required}"
 

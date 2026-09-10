@@ -1,7 +1,13 @@
-#!/bin/sh
-set -e
+#!/bin/bash
+set -euo pipefail
 
 CRONTAB_FILE="/tmp/vtodo-notion.cron"
+LOG_DIR="${LOG_DIR:-/logs}"
+LOG_FILE="${LOG_FILE:-$LOG_DIR/vtodo-notion.log}"
+
+mkdir -p "$LOG_DIR"
+touch "$LOG_FILE"
+exec > >(tee -a "$LOG_FILE") 2>&1
 
 # Create state directory if it doesn't exist
 mkdir -p /data

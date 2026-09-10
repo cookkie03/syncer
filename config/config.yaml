@@ -81,12 +81,9 @@ caldav_backup:
   backup_dir: "/backup"           # Percorso nel container
 
 
-# ── carddav-google-contacts: CardDAV ↔ Google Contacts ───────────────────
+# ── google-contacts-backup: Google Contacts → local incremental backup ────
 
-carddav_google_contacts:
-  sync_interval_minutes: 1440     # 24 ore
+google_contacts_backup:
   backup_interval_minutes: 1440   # 24 ore
-  safety_delete_pct: 0.20         # Soglia sicurezza: abort se cancellazioni > 20%
-  safety_min_state: 50            # Minimo contatti in stato prima di attivare safety
-  side_emptiness_threshold: 0.30  # Abort se un lato ha < 30% dei contatti noti
+  backup_dir: "/backup"           # Snapshot incrementali dei contatti Google
   google_api_delay: 0.5           # Secondi di pausa tra chiamate Google API
