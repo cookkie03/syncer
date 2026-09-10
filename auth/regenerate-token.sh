@@ -4,6 +4,11 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="$PROJECT_DIR/.env"
+TOKEN_DIR="$PROJECT_DIR/vdirsyncer/token"
+
 echo "======================================"
 echo "Google OAuth Token Regenerator"
 echo "======================================"
@@ -13,14 +18,10 @@ echo "using an external browser flow suitable for headless hosts."
 echo "It authorizes Google Calendar and Google Contacts only."
 echo ""
 
-# Check if .env exists (in parent dir or config/)
-if [ -f ../.env ]; then
-    ENV_FILE="../.env"
-elif [ -f .env ]; then
-    ENV_FILE=".env"
-else
+# Check if .env exists in the project root.
+if [ ! -f "$ENV_FILE" ]; then
     echo "❌ Error: .env file not found!"
-    echo "   Please copy config/.env.example to .env and fill in your credentials."
+    echo "   Expected: $ENV_FILE"
     exit 1
 fi
 
@@ -59,16 +60,16 @@ echo "  Client ID: ${DEVICE_CLIENT_ID:0:20}..."
 echo ""
 
 # Create token directory if not exists (in parent dir)
-mkdir -p ../vdirsyncer/token
+mkdir -p "$TOKEN_DIR"
 
 # Backup old token if exists
-if [ -f ../vdirsyncer/token/google.json ]; then
+if [ -f "$TOKEN_DIR/google.json" ]; then
     echo "Backing up old token..."
-    mv ../vdirsyncer/token/google.json ../vdirsyncer/token/google.json.backup.$(date +%Y%m%d_%H%M%S)
+    mv "$TOKEN_DIR/google.json" "$TOKEN_DIR/google.json.backup.$(date +%Y%m%d_%H%M%S)"
 fi
-if [ -f ../vdirsyncer/token/google_contacts.json ]; then
+if [ -f "$TOKEN_DIR/google_contacts.json" ]; then
     echo "Backing up old contacts token..."
-    mv ../vdirsyncer/token/google_contacts.json ../vdirsyncer/token/google_contacts.json.backup.$(date +%Y%m%d_%H%M%S)
+    mv "$TOKEN_DIR/google_contacts.json" "$TOKEN_DIR/google_contacts.json.backup.$(date +%Y%m%d_%H%M%S)"
 fi
 
 echo ""
@@ -76,10 +77,6 @@ echo "======================================"
 echo "Starting external-browser OAuth authorization..."
 echo "======================================"
 echo ""
-
-# Get script and project directories for running authorize-device.py
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Run Python authorization
 if command -v python3 &> /dev/null; then
