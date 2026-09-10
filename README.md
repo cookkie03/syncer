@@ -271,6 +271,16 @@ Each service runs an initial sync/backup immediately on startup, then on its sch
 
 ## Operations
 
+All active service logs are centralized under `./logs/`:
+
+```text
+logs/
+├── caldav-backup/caldav-backup.log
+├── google-contacts-backup/google-contacts-backup.log
+├── spotify-backup/spotify-backup.log
+└── vdirsyncer/vdirsyncer.log
+```
+
 ### Starting and stopping
 
 ```bash
@@ -339,6 +349,7 @@ docker compose ps
 - Telegram notification: you receive a `✅ vdirsyncer sync OK` heartbeat every 24 h (configurable via `NOTIFY_OK_EVERY_HOURS`)
 - To force a manual sync: `docker compose exec vdirsyncer vdirsyncer sync`
 - Sync runs every **60 minutes** by default (override via `SYNC_INTERVAL_MINUTES` in `.env`)
+- At `02:00` UTC every day it discovers both sides, matches calendars by name, updates `config/calendar-map.json`, renders the config, and discovers again before the next sync.
 
 **notion-backup:**
 - Check `NOTION_BACKUP_PATH/json/manifest.json` — it contains `timestamp` and `total_pages`
@@ -348,6 +359,11 @@ docker compose ps
 **caldav-backup:**
 - Check `./caldav-backup/backup/manifest.json` for `timestamp` and item counts
 - `.ics` files are updated in-place every 4 hours
+
+**google-contacts-backup:**
+- The service runs immediately at startup and every 24 hours.
+- Check `google-contacts-backup/backup/latest.json` and `logs/google-contacts-backup/google-contacts-backup.log`.
+- If the log reports `deleted_client`, run `bash auth/regenerate-token.sh`; it backs up both old token files and forces new Calendar and Contacts authorization. The OAuth client used to create the old token was deleted in Google Cloud and cannot be repaired by Docker.
 
 ### Telegram notifications
 

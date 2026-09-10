@@ -11,7 +11,7 @@ services:
     env_file: .env
     volumes:
       - ./spotify-backup/data:/data
-      - ./spotify-backup/logs:/logs
+      - ./logs/spotify-backup:/logs
     environment:
       - BACKUP_INTERVAL_MINUTES=240
       - BACKUP_DIR=/data/backup
@@ -39,7 +39,7 @@ services:
       - ./vdirsyncer/config:/data/vdirsyncer
       - ./vdirsyncer/status:/data/status
       - ./vdirsyncer/token:/data/token
-      - ./vdirsyncer/logs:/logs
+      - ./logs/vdirsyncer:/logs
       - ./config/calendar-map.json:/app/calendar-map.json
     environment:
       - GOOGLE_CLIENT_ID=${GOOGLE_DEVICE_CLIENT_ID}
@@ -47,8 +47,9 @@ services:
       - LOG_DIR=/logs
       - CALENDAR_MAP_FILE=/app/calendar-map.json
       - VDIRSYNCER_RUN_STARTUP_DISCOVER=1
-      - VDIRSYNCER_RUN_STARTUP_SYNC=0
-      - VDIRSYNCER_RUN_SCHEDULE=0
+      - VDIRSYNCER_RUN_STARTUP_SYNC=${VDIRSYNCER_RUN_STARTUP_SYNC:-1}
+      - VDIRSYNCER_RUN_SCHEDULE=${VDIRSYNCER_RUN_SCHEDULE:-1}
+      - VDIRSYNCER_DISCOVER_MATCH_SCHEDULE=${VDIRSYNCER_DISCOVER_MATCH_SCHEDULE:-0 2 * * *}
     healthcheck:
       test: ["CMD", "python", "-c", "import vdirsyncer; print('ok')"]
       interval: 5m
@@ -117,7 +118,7 @@ services:
     env_file: .env
     volumes:
       - ./caldav-backup/backup:/backup
-      - ./caldav-backup/logs:/logs
+      - ./logs/caldav-backup:/logs
       - ./config/config.yaml:/app/config.yaml:ro
       - ./shared:/shared:ro
     environment:
@@ -134,27 +135,27 @@ services:
       start_period: 30s
 
   # ── google-contacts-backup: Incremental Google Contacts Backup ────────────
-  # google-contacts-backup:
-  #   build:
-  #     context: ./google-contacts-backup
-  #     args:
-  #       TARGETARCH: ${TARGETARCH:-amd64}
-  #   image: caldav-sync/google-contacts-backup:local
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   volumes:
-  #     - ./google-contacts-backup/backup:/backup
-  #     - ./google-contacts-backup/logs:/logs
-  #     - ./vdirsyncer/token:/data/token:ro
-  #     - ./config/config.yaml:/app/config.yaml:ro
-  #     - ./shared:/shared:ro
-  #   environment:
-  #     - LOG_DIR=/logs
-  #     - BACKUP_DIR=/backup
-  #     - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google_contacts.json
-  #   healthcheck:
-  #     test: ["CMD", "python3", "-c", "import googleapiclient, vobject, caldav; print('ok')"]
-  #     interval: 5m
-  #     timeout: 10s
-  #     retries: 3
-  #     start_period: 30s
+  google-contacts-backup:
+    build:
+      context: ./google-contacts-backup
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/google-contacts-backup:local
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./google-contacts-backup/backup:/backup
+      - ./logs/google-contacts-backup:/logs
+      - ./vdirsyncer/token:/data/token:ro
+      - ./config/config.yaml:/app/config.yaml:ro
+      - ./shared:/shared:ro
+    environment:
+      - LOG_DIR=/logs
+      - BACKUP_DIR=/backup
+      - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google_contacts.json
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import googleapiclient, vobject, caldav; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s

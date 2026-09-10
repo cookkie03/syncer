@@ -61,6 +61,7 @@ vtodo_notion:
 vdirsyncer:
   sync_interval_minutes: 60
   conflict_resolution: "b wins"   # "a wins" (CalDAV) / "b wins" (Google)
+  discover_match_schedule: "0 2 * * *"  # Discover and match collections daily
 
 
 # ── notion-backup: Backup Notion via API ufficiale ────────────────────────

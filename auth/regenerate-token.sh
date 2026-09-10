@@ -66,6 +66,10 @@ if [ -f ../vdirsyncer/token/google.json ]; then
     echo "Backing up old token..."
     mv ../vdirsyncer/token/google.json ../vdirsyncer/token/google.json.backup.$(date +%Y%m%d_%H%M%S)
 fi
+if [ -f ../vdirsyncer/token/google_contacts.json ]; then
+    echo "Backing up old contacts token..."
+    mv ../vdirsyncer/token/google_contacts.json ../vdirsyncer/token/google_contacts.json.backup.$(date +%Y%m%d_%H%M%S)
+fi
 
 echo ""
 echo "======================================"
