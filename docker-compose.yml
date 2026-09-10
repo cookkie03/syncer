@@ -1,0 +1,161 @@
+services:
+
+  # ── spotify-backup: headless Spotify mirror backup ────────────────────────
+  spotify-backup:
+    build:
+      context: ./spotify-backup
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/spotify-backup:local
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./spotify-backup/data:/data
+      - ./logs/spotify-backup:/logs
+    environment:
+      - BACKUP_INTERVAL_MINUTES=240
+      - BACKUP_DIR=/data/backup
+      - CACHE_PATH=/data/.cache
+      - SPOTIFY_SNAPSHOT_DIR=/data/backup/snapshots
+      - SPOTIFY_SNAPSHOT_RETENTION=${SPOTIFY_SNAPSHOT_RETENTION:-14}
+      - LOG_DIR=/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import spotipy, requests; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── vdirsyncer: CalDAV → Google Calendar ──────────────────────────────────
+  vdirsyncer:
+    build:
+      context: ./vdirsyncer
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/vdirsyncer:local
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./vdirsyncer/config:/data/vdirsyncer
+      - ./vdirsyncer/status:/data/status
+      - ./vdirsyncer/token:/data/token
+      - ./logs/vdirsyncer:/logs
+      - ./config/calendar-map.json:/app/calendar-map.json
+    environment:
+      - GOOGLE_CLIENT_ID=${GOOGLE_DEVICE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_DEVICE_CLIENT_SECRET}
+      - LOG_DIR=/logs
+      - CALENDAR_MAP_FILE=/app/calendar-map.json
+      - VDIRSYNCER_RUN_STARTUP_DISCOVER=1
+      - VDIRSYNCER_RUN_STARTUP_SYNC=${VDIRSYNCER_RUN_STARTUP_SYNC:-1}
+      - VDIRSYNCER_RUN_SCHEDULE=${VDIRSYNCER_RUN_SCHEDULE:-1}
+      - VDIRSYNCER_DISCOVER_MATCH_SCHEDULE=${VDIRSYNCER_DISCOVER_MATCH_SCHEDULE:-0 2 * * *}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import vdirsyncer; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── vtodo-notion: temporarily disabled ────────────────────────────────────
+  # vtodo-notion:
+  #   build:
+  #     context: ./vtodo-notion
+  #     args:
+  #       TARGETARCH: ${TARGETARCH:-amd64}
+  #   image: caldav-sync/vtodo-notion:local
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   <<: *dns-hosts
+  #   volumes:
+  #     - ./vtodo-notion/state:/data
+  #     - ./vtodo-notion/logs:/logs
+  #     - ./config/config.yaml:/app/config.yaml:ro
+  #     - ./shared:/shared:ro
+  #   environment:
+  #     - LOG_DIR=/logs
+  #   healthcheck:
+  #     test: ["CMD", "python", "-c", "import caldav, notion_client; print('ok')"]
+  #     interval: 5m
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s
+
+  # ── notion-backup: temporarily disabled ───────────────────────────────────
+  # notion-backup:
+  #   build:
+  #     context: ./notion-backup
+  #     args:
+  #       TARGETARCH: ${TARGETARCH:-amd64}
+  #   image: caldav-sync/notion-backup:local
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   <<: *dns-hosts
+  #   volumes:
+  #     - ./notion-backup/backup:/backup
+  #     - ./notion-backup/logs:/logs
+  #     - ./vdirsyncer/token:/data/token:ro
+  #     - ./config/config.yaml:/app/config.yaml:ro
+  #     - ./shared:/shared:ro
+  #   environment:
+  #     - GOOGLE_GMAIL_TOKEN_FILE=/data/token/google_gmail.json
+  #     - LOG_DIR=/logs
+  #   healthcheck:
+  #     test: ["CMD", "python3", "-c", "import requests; print('ok')"]
+  #     interval: 5m
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s
+
+  # ── caldav-backup: backup CalDAV calendars and tasks to ICS ───────────────
+  caldav-backup:
+    build:
+      context: ./caldav-backup
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/caldav-backup:local
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./caldav-backup/backup:/backup
+      - ./logs/caldav-backup:/logs
+      - ./config/config.yaml:/app/config.yaml:ro
+      - ./shared:/shared:ro
+    environment:
+      - CALDAV_BACKUP_DIR=/backup
+      - CALDAV_BACKUP_RETENTION=${CALDAV_BACKUP_RETENTION:-14}
+      - CALDAV_DISCOVER_INTERVAL_HOURS=${CALDAV_DISCOVER_INTERVAL_HOURS:-24}
+      - LOG_DIR=/logs
+    command: ["--watch", "--interval", "${CALDAV_BACKUP_INTERVAL_SECONDS:-14400}", "--discover-interval-hours", "${CALDAV_DISCOVER_INTERVAL_HOURS:-24}"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import caldav; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── google-contacts-backup: Incremental Google Contacts Backup ────────────
+  google-contacts-backup:
+    build:
+      context: ./google-contacts-backup
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
+    image: caldav-sync/google-contacts-backup:local
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./google-contacts-backup/backup:/backup
+      - ./logs/google-contacts-backup:/logs
+      - ./vdirsyncer/token:/data/token:ro
+      - ./config/config.yaml:/app/config.yaml:ro
+      - ./shared:/shared:ro
+    environment:
+      - LOG_DIR=/logs
+      - BACKUP_DIR=/backup
+      - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google_contacts.json
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import googleapiclient, vobject, caldav; print('ok')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s

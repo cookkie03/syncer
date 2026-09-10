@@ -1,0 +1,36 @@
+[general]
+# Status directory — persisted across runs
+status_path = "/data/status"
+
+# ──────────────────────────────────────────────
+# VEVENT: CalDAV server → Google Calendar
+# ──────────────────────────────────────────────
+
+[pair caldav_gcal]
+a = "caldav_calendars"
+b = "google_calendars"
+collections = __COLLECTIONS_JSON__
+# Only sync VEVENT items (not VTODO, not VJOURNAL)
+conflict_resolution = "a wins"
+
+[storage caldav_calendars]
+type = "caldav"
+url = "$CALDAV_URL"
+username = "$CALDAV_USERNAME"
+password = "$CALDAV_PASSWORD"
+item_types = ["VEVENT"]
+
+[storage google_calendars]
+type = "google_calendar"
+token_file = "$GOOGLE_TOKEN_FILE"
+# client_id and client_secret are required to initiate the OAuth flow
+# (vdirsyncer authorize) and are embedded in the token file afterwards.
+client_id = "$GOOGLE_CLIENT_ID"
+client_secret = "$GOOGLE_CLIENT_SECRET"
+
+# ──────────────────────────────────────────────
+# VCARD: CardDAV → Google Contacts
+# DISABLED: Google deprecated CardDAV access for
+# new OAuth apps in 2019. The API returns 403 on
+# .well-known/carddav regardless of token scopes.
+# ──────────────────────────────────────────────

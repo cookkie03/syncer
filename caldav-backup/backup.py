@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+"""
+caldav-backup — backup completo del server CalDAV in formato ICS
+
+Esporta tutti i calendari (VEVENT) e le liste task (VTODO) dal server CalDAV
+in file ICS separati. Supporta backup incrementale basato su hardlink.
+
+Usage:
+    python backup.py                    # backup singolo
+    python backup.py --watch            # watchdog mode (backup automatico su modifiche)
+    python backup.py --discover         # solo discover e lista calendari
+"""
+
+import argparse
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import caldav
+
+# ── Logging ────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%SZ",
+)
+log = logging.getLogger("caldav-backup")
+
+
+# ── Environment ────────────────────────────────────────────────────────────
+def require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        log.error("Required environment variable %s is not set", name)
+        sys.exit(1)
+    return value
+
+
+def load_env_from_file(env_path: str = ".env") -> None:
+    """Load environment variables from .env file if running locally."""
+    env_file = Path(env_path)
+    if env_file.exists():
+        with open(env_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip()
+                    # Remove quotes if present
+                    if value and value[0] in ('"', "'") and value[-1] == value[0]:
+                        value = value[1:-1]
+                    if key and value and key not in os.environ:
+                        os.environ[key] = value
+        log.info("Loaded environment from %s", env_path)
+
+
+# Load .env file if running locally (not in container)
+load_env_from_file()
+
+# CalDAV credentials from environment variables
+CALDAV_URL = require_env("CALDAV_URL")
+CALDAV_USERNAME = require_env("CALDAV_USERNAME")
+CALDAV_PASSWORD = require_env("CALDAV_PASSWORD")
+
+
+# Optional: backup directory (default: ./caldav-backup-output)
+BACKUP_DIR = Path(os.environ.get("CALDAV_BACKUP_DIR", "./caldav-backup-output"))
+SNAPSHOT_RETENTION = max(1, int(os.environ.get("CALDAV_BACKUP_RETENTION", "14")))
+DISCOVER_INTERVAL_HOURS = max(1, int(os.environ.get("CALDAV_DISCOVER_INTERVAL_HOURS", "24")))
+
+# ── Configurazione Calendari ─────────────────────────────────────────────
+# NOTA: Usa --discover per trovare tutti i calendari disponibili, poi inserisci i nomi qui.
+# Lascia vuoto per backuppare TUTTI i calendari trovati.
+CALENDARS = []  # es: ["personale", "lavoro", "famiglia"] - lasciare vuoto per tutti
+
+# Calendari VTODO (task) - lascia vuoto per tutti
+VTODO_LISTS = []  # es: ["tasks_default", "promemoria"] - lasciare vuoto per tutti
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Core backup logic
+# ════════════════════════════════════════════════════════════════════════════
+
+def connect_caldav() -> caldav.DAVClient:
+    """Connect to CalDAV server."""
+    log.info("Connecting to CalDAV: %s", CALDAV_URL)
+    client = caldav.DAVClient(
+        url=CALDAV_URL,
+        username=CALDAV_USERNAME,
+        password=CALDAV_PASSWORD,
+    )
+    return client
+
+
+def discover_all_calendars(client: caldav.DAVClient) -> tuple[list[dict], list[dict]]:
+    """
+    Discover all calendars and todo lists using PROPFIND.
+    Returns (calendars, todo_lists).
+    """
+    principal = client.principal()
+    all_calendars = principal.calendars()
+
+    calendars = []
+    todo_lists = []
+
+    for cal in all_calendars:
+        display_name = str(cal.name) if cal.name else cal.url.split("/")[-2]
+        cal_url = str(cal.url)
+
+        # Determine type by checking URL pattern or trying to fetch
+        # Synology Calendar uses /calendars/ for VEVENT and /tasks/ for VTODO
+        if "/tasks/" in cal_url.lower() or "/tasklists/" in cal_url.lower():
+            todo_type = True
+        elif "/calendars/" in cal_url.lower():
+            todo_type = False
+        else:
+            # Try both - will be added to both lists if contains both
+            todo_type = None
+
+        try:
+            # Check for todos
+            todos = cal.todos(include_completed=True)
+            if todos or todo_type:
+                todo_lists.append({
+                    "name": display_name,
+                    "url": cal_url,
+                    "cal": cal,
+                    "count": len(todos) if todos else 0,
+                })
+                log.info("[Discover] VTODO: '%s' (%d items)", display_name, len(todos) if todos else 0)
+        except Exception as exc:
+            log.debug("[Discover] No todos in %s: %s", display_name, exc)
+
+        try:
+            # Check for events
+            events = cal.events()
+            if events or todo_type is False:
+                calendars.append({
+                    "name": display_name,
+                    "url": cal_url,
+                    "cal": cal,
+                    "count": len(events) if events else 0,
+                })
+                log.info("[Discover] Calendar: '%s' (%d events)", display_name, len(events) if events else 0)
+        except Exception as exc:
+            log.debug("[Discover] No events in %s: %s", display_name, exc)
+
+    return calendars, todo_lists
+
+
+def export_calendar(cal: Any, name: str, backup_path: Path, include_completed: bool = True) -> int:
+    """Export a calendar (VEVENT) to ICS file."""
+    ics_path = backup_path / f"calendar_{sanitize_filename(name)}.ics"
+
+    try:
+        events = cal.events()
+        # Build ICS content
+        ics_content = build_ics_from_vevents(events)
+
+        ics_path.write_text(ics_content, encoding="utf-8")
+        log.info("[Export] Calendar '%s' -> %s (%d events)", name, ics_path.name, len(events or []))
+        return len(events)
+
+    except Exception as exc:
+        log.error("[Export] Error exporting calendar '%s': %s", name, exc)
+        raise
+
+
+def export_todo_list(cal: Any, name: str, backup_path: Path, include_completed: bool = True) -> int:
+    """Export a VTODO list to ICS file."""
+    ics_path = backup_path / f"tasks_{sanitize_filename(name)}.ics"
+
+    try:
+        todos = cal.todos(include_completed=include_completed)
+        # Build ICS content
+        ics_content = build_ics_from_vtodos(todos)
+
+        ics_path.write_text(ics_content, encoding="utf-8")
+        log.info("[Export] Tasks '%s' -> %s (%d items)", name, ics_path.name, len(todos or []))
+        return len(todos)
+
+    except Exception as exc:
+        log.error("[Export] Error exporting todo list '%s': %s", name, exc)
+        raise
+
+
+def sanitize_filename(name: str) -> str:
+    """Sanitize string for use in filename."""
+    name = re.sub(r'[<>:"/\\|?*]', '_', name)
+    name = name.strip()
+    return name or "unnamed"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def prune_snapshots(backup_root: Path, retention: int = SNAPSHOT_RETENTION) -> None:
+    snapshots_dir = backup_root / "snapshots"
+    snapshots = sorted(
+        (path for path in snapshots_dir.iterdir() if path.is_dir()),
+        key=lambda path: path.name,
+        reverse=True,
+    ) if snapshots_dir.exists() else []
+    for snapshot in snapshots[retention:]:
+        shutil.rmtree(snapshot)
+
+
+def promote_snapshot(staging: Path, backup_root: Path, metadata: dict[str, Any]) -> Path:
+    files = sorted(path for path in staging.rglob("*.ics") if path.is_file())
+    if not files:
+        raise RuntimeError("Backup produced no ICS files")
+
+    checksums = {
+        str(path.relative_to(staging)): sha256_file(path)
+        for path in files
+    }
+    manifest = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "stats": metadata.get("stats", {}),
+        "calendars": metadata.get("calendars", []),
+        "todo_lists": metadata.get("todo_lists", []),
+        "checksums": checksums,
+    }
+    (staging / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False, default=str) + "\n",
+        encoding="utf-8",
+    )
+
+    snapshots_dir = backup_root / "snapshots"
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = snapshots_dir / datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+    suffix = 1
+    while snapshot.exists():
+        snapshot = snapshots_dir / f"{snapshot.name}-{suffix}"
+        suffix += 1
+    os.replace(staging, snapshot)
+
+    latest = backup_root / "latest"
+    latest_staging = backup_root / ".latest-staging"
+    previous = backup_root / ".latest-previous"
+    try:
+        if latest_staging.exists():
+            shutil.rmtree(latest_staging)
+        shutil.copytree(snapshot, latest_staging)
+        if previous.exists():
+            shutil.rmtree(previous)
+        if latest.exists():
+            os.replace(latest, previous)
+        os.replace(latest_staging, latest)
+    except Exception:
+        if not latest.exists() and previous.exists():
+            os.replace(previous, latest)
+        raise
+    finally:
+        if latest_staging.exists():
+            shutil.rmtree(latest_staging)
+        if previous.exists():
+            shutil.rmtree(previous)
+
+    prune_snapshots(backup_root)
+    return latest
+
+
+def build_ics_from_vevents(events: list) -> str:
+    """Build ICS content from CalDAV VEVENT objects."""
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//caldav-backup//EN",
+        "CALSCALE:GREGORIAN",
+    ]
+
+    for event in events:
+        try:
+            # Get the raw iCal data
+            if hasattr(event, "data") and event.data:
+                ics_data = event.data
+                # Extract just the VEVENT component
+                if "BEGIN:VEVENT" in ics_data:
+                    # Find the VEVENT block
+                    start = ics_data.find("BEGIN:VEVENT")
+                    end = ics_data.find("END:VEVENT") + len("END:VEVENT")
+                    if start >= 0 and end > start:
+                        vevent = ics_data[start:end]
+                        lines.append(vevent)
+        except Exception as exc:
+            log.warning("[ICS] Error processing event: %s", exc)
+
+    lines.append("END:VCALENDAR")
+    return "\n".join(lines) + "\n"
+
+
+def build_ics_from_vtodos(todos: list) -> str:
+    """Build ICS content from CalDAV VTODO objects."""
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//caldav-backup//EN",
+    ]
+
+    for todo in todos:
+        try:
+            if hasattr(todo, "data") and todo.data:
+                ics_data = todo.data
+                if "BEGIN:VTODO" in ics_data:
+                    start = ics_data.find("BEGIN:VTODO")
+                    end = ics_data.find("END:VTODO") + len("END:VTODO")
+                    if start >= 0 and end > start:
+                        vtodo = ics_data[start:end]
+                        lines.append(vtodo)
+        except Exception as exc:
+            log.warning("[ICS] Error processing todo: %s", exc)
+
+    lines.append("END:VCALENDAR")
+    return "\n".join(lines) + "\n"
+
+
+def run_backup() -> dict:
+    """Run the backup process."""
+    log.info("=" * 60)
+    log.info("Starting CalDAV backup")
+    log.info("=" * 60)
+
+    client = connect_caldav()
+
+    # Discover all calendars
+    log.info("Discovering calendars...")
+    calendars, todo_lists = discover_all_calendars(client)
+
+    log.info("=" * 60)
+    log.info("Found %d calendars, %d task lists", len(calendars), len(todo_lists))
+    log.info("=" * 60)
+
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=BACKUP_DIR))
+
+    stats = {"calendars": 0, "events": 0, "todo_lists": 0, "todos": 0}
+    failures = []
+
+    # Filter calendars if specific ones are configured
+    if CALENDARS:
+        calendars = [c for c in calendars if c["name"] in CALENDARS]
+        log.info("Filtered to configured calendars: %s", CALENDARS)
+
+    # Filter todo lists if specific ones are configured
+    if VTODO_LISTS:
+        todo_lists = [t for t in todo_lists if t["name"] in VTODO_LISTS]
+        log.info("Filtered to configured task lists: %s", VTODO_LISTS)
+
+    # Export calendars (VEVENT)
+    log.info("-" * 40)
+    log.info("Exporting calendars (VEVENT)...")
+    for cal_info in calendars:
+        try:
+            count = export_calendar(cal_info["cal"], cal_info["name"], staging)
+            stats["calendars"] += 1
+            stats["events"] += count
+        except Exception as exc:
+            log.error("Error exporting calendar %s: %s", cal_info["name"], exc)
+            failures.append(f"calendar:{cal_info['name']}: {exc}")
+
+    # Export todo lists (VTODO)
+    log.info("-" * 40)
+    log.info("Exporting task lists (VTODO)...")
+    for todo_info in todo_lists:
+        try:
+            count = export_todo_list(todo_info["cal"], todo_info["name"], staging)
+            stats["todo_lists"] += 1
+            stats["todos"] += count
+        except Exception as exc:
+            log.error("Error exporting task list %s: %s", todo_info["name"], exc)
+            failures.append(f"todo:{todo_info['name']}: {exc}")
+
+    if failures:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise RuntimeError("Backup failed: " + "; ".join(failures))
+
+    metadata = {
+        "calendars": [
+            {"name": c["name"], "url": c["url"], "count": c["count"]}
+            for c in calendars
+        ],
+        "todo_lists": [
+            {"name": t["name"], "url": t["url"], "count": t["count"]}
+            for t in todo_lists
+        ],
+        "stats": stats,
+    }
+    latest = promote_snapshot(staging, BACKUP_DIR, metadata)
+
+    log.info("=" * 60)
+    log.info("Backup complete!")
+    log.info("  Calendars: %d (%d events)", stats["calendars"], stats["events"])
+    log.info("  Task lists: %d (%d items)", stats["todo_lists"], stats["todos"])
+    log.info("  Output: %s", latest)
+    log.info("=" * 60)
+
+    return stats
+
+
+def run_discover() -> None:
+    """Just discover and list all available calendars."""
+    log.info("=" * 60)
+    log.info("CalDAV Calendar Discovery")
+    log.info("=" * 60)
+
+    client = connect_caldav()
+    calendars, todo_lists = discover_all_calendars(client)
+
+    log.info("=" * 60)
+    log.info("DISCOVERED CALENDARS (VEVENT):")
+    log.info("=" * 60)
+    for cal in calendars:
+        log.info("  - %s (%d events)", cal["name"], cal["count"])
+        log.info("    URL: %s", cal["url"])
+
+    log.info("=" * 60)
+    log.info("DISCOVERED TASK LISTS (VTODO):")
+    log.info("=" * 60)
+    for todo in todo_lists:
+        log.info("  - %s (%d items)", todo["name"], todo["count"])
+        log.info("    URL: %s", todo["url"])
+
+    log.info("=" * 60)
+    log.info("To backup specific calendars, edit this script and set:")
+    log.info("  CALENDARS = [%s]", ", ".join(f'"{c["name"]}"' for c in calendars))
+    log.info("  VTODO_LISTS = [%s]", ", ".join(f'"{t["name"]}"' for t in todo_lists))
+    log.info("=" * 60)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CalDAV backup tool")
+    parser.add_argument(
+        "--discover", "-d",
+        action="store_true",
+        help="Discover and list all available calendars (no backup)",
+    )
+    parser.add_argument(
+        "--watch", "-w",
+        action="store_true",
+        help="Watch mode: run backup continuously (every 60 seconds)",
+    )
+    parser.add_argument(
+        "--interval", "-i",
+        type=int,
+        default=60,
+        help="Interval in seconds for watch mode (default: 60)",
+    )
+    parser.add_argument(
+        "--discover-interval-hours",
+        type=int,
+        default=DISCOVER_INTERVAL_HOURS,
+        help="Run an additional discovery log pass at this interval (default: 24)",
+    )
+    args = parser.parse_args()
+
+    if args.discover:
+        run_discover()
+    elif args.watch:
+        log.info("Starting watch mode (backup every %d seconds, Ctrl+C to stop)", args.interval)
+        last_discovery = 0.0
+        try:
+            while True:
+                try:
+                    now = time.monotonic()
+                    if now - last_discovery >= args.discover_interval_hours * 3600:
+                        log.info("Running scheduled daily discovery")
+                        run_discover()
+                        last_discovery = now
+                    run_backup()
+                except Exception as exc:
+                    log.error("Backup failed: %s", exc)
+                log.info("Waiting %d seconds...", args.interval)
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            log.info("Watch mode stopped.")
+    else:
+        run_backup()
+
+
+if __name__ == "__main__":
+    main()
