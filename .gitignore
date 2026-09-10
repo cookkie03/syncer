@@ -45,6 +45,8 @@ config/calendar-map.json
 # Vdirsyncer (CalDAV ↔ Google sync)
 vdirsyncer/status/
 vdirsyncer/token/
+vdirsyncer/config/*
+!vdirsyncer/config/.gitkeep
 
 # vtodo-notion sync state
 vtodo-notion/state/

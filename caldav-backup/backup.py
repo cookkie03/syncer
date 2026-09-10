@@ -12,12 +12,14 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +75,8 @@ CALDAV_PASSWORD = require_env("CALDAV_PASSWORD")
 
 # Optional: backup directory (default: ./caldav-backup-output)
 BACKUP_DIR = Path(os.environ.get("CALDAV_BACKUP_DIR", "./caldav-backup-output"))
+SNAPSHOT_RETENTION = max(1, int(os.environ.get("CALDAV_BACKUP_RETENTION", "14")))
+DISCOVER_INTERVAL_HOURS = max(1, int(os.environ.get("CALDAV_DISCOVER_INTERVAL_HOURS", "24")))
 
 # ── Configurazione Calendari ─────────────────────────────────────────────
 # NOTA: Usa --discover per trovare tutti i calendari disponibili, poi inserisci i nomi qui.
@@ -160,20 +164,16 @@ def export_calendar(cal: Any, name: str, backup_path: Path, include_completed: b
 
     try:
         events = cal.events()
-        if not events:
-            log.info("[Export] No events in calendar '%s'", name)
-            return 0
-
         # Build ICS content
         ics_content = build_ics_from_vevents(events)
 
         ics_path.write_text(ics_content, encoding="utf-8")
-        log.info("[Export] Calendar '%s' -> %s (%d events)", name, ics_path.name, len(events))
+        log.info("[Export] Calendar '%s' -> %s (%d events)", name, ics_path.name, len(events or []))
         return len(events)
 
     except Exception as exc:
         log.error("[Export] Error exporting calendar '%s': %s", name, exc)
-        return 0
+        raise
 
 
 def export_todo_list(cal: Any, name: str, backup_path: Path, include_completed: bool = True) -> int:
@@ -182,20 +182,16 @@ def export_todo_list(cal: Any, name: str, backup_path: Path, include_completed: 
 
     try:
         todos = cal.todos(include_completed=include_completed)
-        if not todos:
-            log.info("[Export] No todos in list '%s'", name)
-            return 0
-
         # Build ICS content
         ics_content = build_ics_from_vtodos(todos)
 
         ics_path.write_text(ics_content, encoding="utf-8")
-        log.info("[Export] Tasks '%s' -> %s (%d items)", name, ics_path.name, len(todos))
+        log.info("[Export] Tasks '%s' -> %s (%d items)", name, ics_path.name, len(todos or []))
         return len(todos)
 
     except Exception as exc:
         log.error("[Export] Error exporting todo list '%s': %s", name, exc)
-        return 0
+        raise
 
 
 def sanitize_filename(name: str) -> str:
@@ -203,6 +199,81 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'[<>:"/\\|?*]', '_', name)
     name = name.strip()
     return name or "unnamed"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def prune_snapshots(backup_root: Path, retention: int = SNAPSHOT_RETENTION) -> None:
+    snapshots_dir = backup_root / "snapshots"
+    snapshots = sorted(
+        (path for path in snapshots_dir.iterdir() if path.is_dir()),
+        key=lambda path: path.name,
+        reverse=True,
+    ) if snapshots_dir.exists() else []
+    for snapshot in snapshots[retention:]:
+        shutil.rmtree(snapshot)
+
+
+def promote_snapshot(staging: Path, backup_root: Path, metadata: dict[str, Any]) -> Path:
+    files = sorted(path for path in staging.rglob("*.ics") if path.is_file())
+    if not files:
+        raise RuntimeError("Backup produced no ICS files")
+
+    checksums = {
+        str(path.relative_to(staging)): sha256_file(path)
+        for path in files
+    }
+    manifest = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "stats": metadata.get("stats", {}),
+        "calendars": metadata.get("calendars", []),
+        "todo_lists": metadata.get("todo_lists", []),
+        "checksums": checksums,
+    }
+    (staging / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False, default=str) + "\n",
+        encoding="utf-8",
+    )
+
+    snapshots_dir = backup_root / "snapshots"
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = snapshots_dir / datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+    suffix = 1
+    while snapshot.exists():
+        snapshot = snapshots_dir / f"{snapshot.name}-{suffix}"
+        suffix += 1
+    os.replace(staging, snapshot)
+
+    latest = backup_root / "latest"
+    latest_staging = backup_root / ".latest-staging"
+    previous = backup_root / ".latest-previous"
+    try:
+        if latest_staging.exists():
+            shutil.rmtree(latest_staging)
+        shutil.copytree(snapshot, latest_staging)
+        if previous.exists():
+            shutil.rmtree(previous)
+        if latest.exists():
+            os.replace(latest, previous)
+        os.replace(latest_staging, latest)
+    except Exception:
+        if not latest.exists() and previous.exists():
+            os.replace(previous, latest)
+        raise
+    finally:
+        if latest_staging.exists():
+            shutil.rmtree(latest_staging)
+        if previous.exists():
+            shutil.rmtree(previous)
+
+    prune_snapshots(backup_root)
+    return latest
 
 
 def build_ics_from_vevents(events: list) -> str:
@@ -231,7 +302,7 @@ def build_ics_from_vevents(events: list) -> str:
             log.warning("[ICS] Error processing event: %s", exc)
 
     lines.append("END:VCALENDAR")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
 
 def build_ics_from_vtodos(todos: list) -> str:
@@ -256,7 +327,7 @@ def build_ics_from_vtodos(todos: list) -> str:
             log.warning("[ICS] Error processing todo: %s", exc)
 
     lines.append("END:VCALENDAR")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
 
 def run_backup() -> dict:
@@ -275,25 +346,11 @@ def run_backup() -> dict:
     log.info("Found %d calendars, %d task lists", len(calendars), len(todo_lists))
     log.info("=" * 60)
 
-    # Backup directory - directly in BACKUP_DIR (no timestamp subfolder)
-    backup_path = BACKUP_DIR
-    backup_path.mkdir(parents=True, exist_ok=True)
-
-    # Clean old backup - remove ALL files and subdirectories
-    log.info("Cleaning old backup...")
-    for item in list(backup_path.iterdir()):
-        if item.name == ".git":
-            continue
-        try:
-            if item.is_dir():
-                shutil.rmtree(item, ignore_errors=True)
-            else:
-                item.unlink()
-        except Exception as e:
-            log.warning("Could not remove %s: %s", item.name, e)
-    log.info("Old backup cleaned")
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=BACKUP_DIR))
 
     stats = {"calendars": 0, "events": 0, "todo_lists": 0, "todos": 0}
+    failures = []
 
     # Filter calendars if specific ones are configured
     if CALENDARS:
@@ -310,30 +367,30 @@ def run_backup() -> dict:
     log.info("Exporting calendars (VEVENT)...")
     for cal_info in calendars:
         try:
-            count = export_calendar(cal_info["cal"], cal_info["name"], backup_path)
-            if count > 0:
-                stats["calendars"] += 1
-                stats["events"] += count
+            count = export_calendar(cal_info["cal"], cal_info["name"], staging)
+            stats["calendars"] += 1
+            stats["events"] += count
         except Exception as exc:
             log.error("Error exporting calendar %s: %s", cal_info["name"], exc)
+            failures.append(f"calendar:{cal_info['name']}: {exc}")
 
     # Export todo lists (VTODO)
     log.info("-" * 40)
     log.info("Exporting task lists (VTODO)...")
     for todo_info in todo_lists:
         try:
-            count = export_todo_list(todo_info["cal"], todo_info["name"], backup_path)
-            if count > 0:
-                stats["todo_lists"] += 1
-                stats["todos"] += count
+            count = export_todo_list(todo_info["cal"], todo_info["name"], staging)
+            stats["todo_lists"] += 1
+            stats["todos"] += count
         except Exception as exc:
             log.error("Error exporting task list %s: %s", todo_info["name"], exc)
+            failures.append(f"todo:{todo_info['name']}: {exc}")
 
-    # Save manifest
-    timestamp = datetime.now(timezone.utc).isoformat()
-    manifest = {
-        "timestamp": timestamp,
-        "backup_dir": str(backup_path),
+    if failures:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise RuntimeError("Backup failed: " + "; ".join(failures))
+
+    metadata = {
         "calendars": [
             {"name": c["name"], "url": c["url"], "count": c["count"]}
             for c in calendars
@@ -344,16 +401,13 @@ def run_backup() -> dict:
         ],
         "stats": stats,
     }
-
-    manifest_path = backup_path / "manifest.json"
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
+    latest = promote_snapshot(staging, BACKUP_DIR, metadata)
 
     log.info("=" * 60)
     log.info("Backup complete!")
     log.info("  Calendars: %d (%d events)", stats["calendars"], stats["events"])
     log.info("  Task lists: %d (%d items)", stats["todo_lists"], stats["todos"])
-    log.info("  Output: %s", backup_path)
+    log.info("  Output: %s", latest)
     log.info("=" * 60)
 
     return stats
@@ -407,15 +461,27 @@ def main() -> None:
         default=60,
         help="Interval in seconds for watch mode (default: 60)",
     )
+    parser.add_argument(
+        "--discover-interval-hours",
+        type=int,
+        default=DISCOVER_INTERVAL_HOURS,
+        help="Run an additional discovery log pass at this interval (default: 24)",
+    )
     args = parser.parse_args()
 
     if args.discover:
         run_discover()
     elif args.watch:
         log.info("Starting watch mode (backup every %d seconds, Ctrl+C to stop)", args.interval)
+        last_discovery = 0.0
         try:
             while True:
                 try:
+                    now = time.monotonic()
+                    if now - last_discovery >= args.discover_interval_hours * 3600:
+                        log.info("Running scheduled daily discovery")
+                        run_discover()
+                        last_discovery = now
                     run_backup()
                 except Exception as exc:
                     log.error("Backup failed: %s", exc)

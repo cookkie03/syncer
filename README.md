@@ -431,12 +431,16 @@ The path at `NOTION_BACKUP_PATH` is a plain directory on your host filesystem:
 
 ```
 ./caldav-backup/backup/
-├── calendar_NomCalendario.ics          ← all VEVENT for that calendar
-├── tasks_NomeLista.ics                 ← all VTODO for that task list
-└── manifest.json                       ← timestamp, calendar list, item counts
+├── latest/                             ← last complete successful backup
+│   ├── calendar_NomCalendario.ics
+│   ├── tasks_NomeLista.ics
+│   └── manifest.json                   ← counts and SHA-256 checksums
+└── snapshots/                          ← timestamped complete backups
 ```
 
-Files are overwritten in-place on every backup (every 4 hours). There is no rotation — the backup is a snapshot of the current CalDAV server state.
+Backups are written to a temporary directory and promoted only after all collections are exported. A failed run leaves `latest` unchanged. Fourteen snapshots are retained by default and discovery runs once per day in addition to the four-hour backup cycle.
+
+The vdirsyncer generated configuration is stored in `./vdirsyncer/config`, alongside its status, OAuth tokens and logs. Spotify keeps its OAuth cache, current JSON, `latest` copy and retained snapshots under `./spotify-backup/data`.
 
 ---
 
@@ -462,7 +466,11 @@ Files are overwritten in-place on every backup (every 4 hours). There is no rota
 | `NOTION_BACKUP_PATH` | notion-backup | ✓ | — | **Absolute host path** for backup storage (must exist) |
 | `BACKUP_SCHEDULE` | notion-backup | — | `0 2 * * *` | Cron expression (UTC) — default = 3:00 AM CET |
 | `GIT_REMOTE_URL` | notion-backup | — | — | Git remote to push backup repo after each commit |
-| `CALDAV_BACKUP_DIR` | caldav-backup | — | `/backup` (container path) | Internal container path for CalDAV `.ics` backup files — host path is fixed to `./caldav-backup/backup/` via the volume bind in `docker-compose.yml` |
+| `CALDAV_BACKUP_DIR` | caldav-backup | — | `/backup` (container path) | Internal container path; host data is always under `./caldav-backup/backup/` |
+| `CALDAV_BACKUP_RETENTION` | caldav-backup | — | `14` | Complete CalDAV snapshots to retain |
+| `CALDAV_BACKUP_INTERVAL_SECONDS` | caldav-backup | — | `14400` | Automatic backup interval |
+| `CALDAV_DISCOVER_INTERVAL_HOURS` | caldav-backup | — | `24` | Periodic collection discovery interval |
+| `SPOTIFY_SNAPSHOT_RETENTION` | spotify-backup | — | `14` | Complete Spotify snapshots to retain |
 | `TELEGRAM_BOT_TOKEN` | all | — | — | Telegram bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | all | — | — | Your Telegram user or chat ID |
 | `TARGETARCH` | all (build) | ✓ | `amd64` | `amd64` (Intel/AMD) or `arm64` |
@@ -471,7 +479,8 @@ Files are overwritten in-place on every backup (every 4 hours). There is no rota
 
 ## Architecture notes
 
-- All services schedule themselves via **supercronic** — no external cron needed
+- The three active services schedule themselves via **supercronic** — no external cron needed
+- All active runtime state is stored below the project directory using relative bind mounts; copying `syncer/` preserves data, tokens, generated config and logs
 - `vtodo-notion` is **bidirectional**: conflict resolution is based on `last-modified` timestamp (most recent write wins)
 - `google-contacts-backup` is **one-way and backup-only**: it reads Google Contacts via the People API and stores incremental local `.vcf` snapshots with hardlinks for unchanged contacts.
 - `vdirsyncer` is **bidirectional**: new/changed events propagate in both directions; when both sides differ simultaneously, **GCal wins** (`conflict_resolution = "b wins"`) — correct for shared meeting invitations where you are not the organizer. `My Calendar` (`l.manca03@gmail.com`) is excluded from sync to avoid 403 errors on read-only events.

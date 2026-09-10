@@ -78,7 +78,18 @@ notion_backup:
 
 caldav_backup:
   watch_interval_seconds: 14400   # Intervallo polling (14400 = 4 ore)
+  discover_interval_hours: 24     # Inventario CalDAV aggiuntivo giornaliero
+  snapshot_retention: 14          # Snapshot completi conservati
   backup_dir: "/backup"           # Percorso nel container
+
+
+# ── spotify-backup: Spotify → JSON persistente ────────────────────────────
+
+spotify_backup:
+  backup_interval_minutes: 240
+  snapshot_retention: 14
+  backup_dir: "/data/backup"
+  snapshot_dir: "/data/backup/snapshots"
 
 
 # ── google-contacts-backup: Google Contacts → local incremental backup ────

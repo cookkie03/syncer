@@ -1,18 +1,3 @@
-x-dns-hosts: &dns-hosts
-  # Docker Desktop on Windows/WSL2 blocks UDP/53 and the ISP DNS
-  # (Telecom Italia) hijacks NXDOMAIN. extra_hosts bypasses DNS entirely.
-  # Update IPs if they change: resolve via DoH (curl 'https://1.1.1.1/dns-query?name=HOST&type=A' -H 'accept: application/dns-json')
-  extra_hosts:
-    - "host.docker.internal:host-gateway"
-    - "calendar.lucamanca.synology.me:${SYNOLOGY_IP:-79.50.144.75}"
-    - "synologyds224.tail234659.ts.net:${SYNOLOGY_IP:-79.50.144.75}"
-    - "api.notion.com:${NOTION_API_IP:-208.103.161.2}"
-    - "api.telegram.org:${TELEGRAM_API_IP:-149.154.166.110}"
-    - "www.googleapis.com:${GOOGLEAPIS_IP:-192.178.203.95}"
-    - "oauth2.googleapis.com:${GOOGLEAPIS_OAUTH_IP:-142.251.127.95}"
-    - "gmail.googleapis.com:${GMAIL_API_IP:-142.250.181.170}"
-    - "people.googleapis.com:${PEOPLE_API_IP:-142.251.141.234}"
-
 services:
 
   # ── spotify-backup: headless Spotify mirror backup ────────────────────────
@@ -31,6 +16,8 @@ services:
       - BACKUP_INTERVAL_MINUTES=240
       - BACKUP_DIR=/data/backup
       - CACHE_PATH=/data/.cache
+      - SPOTIFY_SNAPSHOT_DIR=/data/backup/snapshots
+      - SPOTIFY_SNAPSHOT_RETENTION=${SPOTIFY_SNAPSHOT_RETENTION:-14}
       - LOG_DIR=/logs
     healthcheck:
       test: ["CMD", "python", "-c", "import spotipy, requests; print('ok')"]
@@ -48,8 +35,8 @@ services:
     image: caldav-sync/vdirsyncer:local
     restart: unless-stopped
     env_file: .env
-    <<: *dns-hosts
     volumes:
+      - ./vdirsyncer/config:/data/vdirsyncer
       - ./vdirsyncer/status:/data/status
       - ./vdirsyncer/token:/data/token
       - ./vdirsyncer/logs:/logs
@@ -128,7 +115,6 @@ services:
     image: caldav-sync/caldav-backup:local
     restart: unless-stopped
     env_file: .env
-    <<: *dns-hosts
     volumes:
       - ./caldav-backup/backup:/backup
       - ./caldav-backup/logs:/logs
@@ -136,8 +122,10 @@ services:
       - ./shared:/shared:ro
     environment:
       - CALDAV_BACKUP_DIR=/backup
+      - CALDAV_BACKUP_RETENTION=${CALDAV_BACKUP_RETENTION:-14}
+      - CALDAV_DISCOVER_INTERVAL_HOURS=${CALDAV_DISCOVER_INTERVAL_HOURS:-24}
       - LOG_DIR=/logs
-    command: ["--watch", "--interval", "14400"]
+    command: ["--watch", "--interval", "${CALDAV_BACKUP_INTERVAL_SECONDS:-14400}", "--discover-interval-hours", "${CALDAV_DISCOVER_INTERVAL_HOURS:-24}"]
     healthcheck:
       test: ["CMD", "python", "-c", "import caldav; print('ok')"]
       interval: 5m
@@ -146,28 +134,27 @@ services:
       start_period: 30s
 
   # ── google-contacts-backup: Incremental Google Contacts Backup ────────────
-  google-contacts-backup:
-    build:
-      context: ./google-contacts-backup
-      args:
-        TARGETARCH: ${TARGETARCH:-amd64}
-    image: caldav-sync/google-contacts-backup:local
-    restart: unless-stopped
-    env_file: .env
-    <<: *dns-hosts
-    volumes:
-      - ./google-contacts-backup/backup:/backup
-      - ./google-contacts-backup/logs:/logs
-      - ./vdirsyncer/token:/data/token:ro
-      - ./config/config.yaml:/app/config.yaml:ro
-      - ./shared:/shared:ro
-    environment:
-      - LOG_DIR=/logs
-      - BACKUP_DIR=/backup
-      - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google_contacts.json
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import googleapiclient, vobject, caldav; print('ok')"]
-      interval: 5m
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+  # google-contacts-backup:
+  #   build:
+  #     context: ./google-contacts-backup
+  #     args:
+  #       TARGETARCH: ${TARGETARCH:-amd64}
+  #   image: caldav-sync/google-contacts-backup:local
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   volumes:
+  #     - ./google-contacts-backup/backup:/backup
+  #     - ./google-contacts-backup/logs:/logs
+  #     - ./vdirsyncer/token:/data/token:ro
+  #     - ./config/config.yaml:/app/config.yaml:ro
+  #     - ./shared:/shared:ro
+  #   environment:
+  #     - LOG_DIR=/logs
+  #     - BACKUP_DIR=/backup
+  #     - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google_contacts.json
+  #   healthcheck:
+  #     test: ["CMD", "python3", "-c", "import googleapiclient, vobject, caldav; print('ok')"]
+  #     interval: 5m
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s

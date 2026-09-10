@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import types
@@ -55,7 +56,7 @@ class SpotifyBackupTests(unittest.TestCase):
     def tearDown(self):
         self.tmpdir.cleanup()
 
-    def test_save_backup_replaces_single_current_snapshot_without_history(self):
+    def test_save_backup_keeps_current_latest_and_history(self):
         module = load_backup_module(self)
         module.BACKUP_DIR = str(self.backup_dir)
 
@@ -64,9 +65,14 @@ class SpotifyBackupTests(unittest.TestCase):
 
         self.assertEqual(first, str(self.backup_dir / "spotify_backup_current.json"))
         self.assertEqual(second, first)
+        self.assertTrue((self.backup_dir / "spotify_backup_current.json").exists())
         self.assertEqual(
-            sorted(path.name for path in self.backup_dir.iterdir()),
-            ["spotify_backup_current.json"],
+            len(list((self.backup_dir / "snapshots").glob("*.json"))),
+            2,
+        )
+        self.assertEqual(
+            json.loads((self.backup_dir / "latest" / "spotify_backup_current.json").read_text()),
+            {"timestamp": "2026-07-17T14:00:00"},
         )
 
     def test_main_returns_failure_when_oauth_cache_is_missing(self):
@@ -86,6 +92,219 @@ class SpotifyBackupTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIsNotNone(captured)
         self.assertIn("OAuth cache", "\n".join(captured.output))
+
+    def test_get_spotify_client_disables_long_rate_limit_retries(self):
+        module = load_backup_module(self)
+        module.CLIENT_ID = "client"
+        module.CLIENT_SECRET = "secret"
+        captured = {}
+
+        class FakeSpotifyClient:
+            def __init__(self, *args, **kwargs):
+                captured.update(kwargs)
+
+        with patch.object(module, "Spotify", FakeSpotifyClient):
+            module.get_spotify_client()
+
+        self.assertEqual(captured["retries"], 0)
+        self.assertEqual(captured["status_retries"], 0)
+        self.assertEqual(captured["backoff_factor"], 0)
+
+    def test_backup_playlists_skips_inaccessible_playlists_and_keeps_metadata(self):
+        module = load_backup_module(self)
+        module.BACKUP_DIR = str(self.backup_dir)
+
+        class FakeSpotify:
+            def current_user_playlists(self):
+                return {
+                    "items": [
+                        {
+                            "id": "ok-playlist",
+                            "name": "Owned playlist",
+                            "description": "ok",
+                            "owner": {"id": "cookie.manca03"},
+                            "collaborative": False,
+                            "public": False,
+                            "items": {"total": 1},
+                        },
+                        {
+                            "id": "forbidden-playlist",
+                            "name": "Blocked playlist",
+                            "description": "forbidden",
+                            "owner": {"id": "spotify-editor"},
+                            "collaborative": False,
+                            "public": True,
+                            "items": {"total": 99},
+                        },
+                    ],
+                    "next": None,
+                }
+
+            def playlist_items(self, playlist_id, limit=None):
+                if playlist_id == "forbidden-playlist":
+                    raise RuntimeError("http status: 403")
+                return {
+                    "items": [
+                        {
+                            "track": {
+                                "id": "track-1",
+                                "name": "Song",
+                                "artists": [{"id": "artist-1", "name": "Artist"}],
+                                "album": {"id": "album-1", "name": "Album", "release_date": "2026-01-01"},
+                                "duration_ms": 1000,
+                                "popularity": 50,
+                                "uri": "spotify:track:track-1",
+                            }
+                        }
+                    ],
+                    "next": None,
+                }
+
+        playlists = module.backup_playlists(FakeSpotify())
+
+        self.assertEqual(len(playlists), 2)
+        self.assertEqual(playlists[0]["tracks"][0]["id"], "track-1")
+        self.assertEqual(playlists[0]["tracks_count"], 1)
+        self.assertEqual(playlists[1]["id"], "forbidden-playlist")
+        self.assertEqual(playlists[1]["tracks"], [])
+        self.assertEqual(playlists[1]["tracks_count"], 99)
+        self.assertEqual(playlists[1]["tracks_error"], "http status: 403")
+
+    def test_backup_playlists_skips_items_without_track_but_keeps_other_tracks(self):
+        module = load_backup_module(self)
+        module.BACKUP_DIR = str(self.backup_dir)
+
+        class FakeSpotify:
+            def current_user_playlists(self):
+                return {
+                    "items": [
+                        {
+                            "id": "mixed-playlist",
+                            "name": "Mixed playlist",
+                            "description": "mixed",
+                            "owner": {"id": "cookie.manca03"},
+                            "collaborative": False,
+                            "public": False,
+                            "items": {"total": 3},
+                        }
+                    ],
+                    "next": None,
+                }
+
+            def playlist_items(self, playlist_id, limit=None):
+                return {
+                    "items": [
+                        {"episode": {"id": "episode-1"}},
+                        {"track": None},
+                        {
+                            "track": {
+                                "id": "track-1",
+                                "name": "Song",
+                                "artists": [{"id": "artist-1", "name": "Artist"}],
+                                "album": {"id": "album-1", "name": "Album", "release_date": "2026-01-01"},
+                                "duration_ms": 1000,
+                                "popularity": 50,
+                                "uri": "spotify:track:track-1",
+                            }
+                        },
+                    ],
+                    "next": None,
+                }
+
+        playlists = module.backup_playlists(FakeSpotify())
+
+        self.assertEqual(len(playlists), 1)
+        self.assertEqual(playlists[0]["tracks_count"], 3)
+        self.assertEqual(len(playlists[0]["tracks"]), 1)
+        self.assertEqual(playlists[0]["tracks"][0]["id"], "track-1")
+        self.assertNotIn("tracks_error", playlists[0])
+
+    def test_backup_liked_tracks_tolerates_missing_optional_track_fields(self):
+        module = load_backup_module(self)
+
+        class FakeSpotify:
+            def current_user_saved_tracks(self):
+                return {
+                    "items": [
+                        {
+                            "added_at": "2026-07-17T19:31:51Z",
+                            "track": {
+                                "id": "track-1",
+                                "name": "Song",
+                                "artists": [{"id": "artist-1", "name": "Artist"}],
+                                "album": {"id": "album-1", "name": "Album"},
+                                "duration_ms": 1000,
+                                "uri": "spotify:track:track-1",
+                            },
+                        }
+                    ],
+                    "next": None,
+                }
+
+        tracks = module.backup_liked_tracks(FakeSpotify())
+
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0]["id"], "track-1")
+        self.assertIsNone(tracks[0]["popularity"])
+        self.assertIsNone(tracks[0]["album"]["release_date"])
+
+    def test_backup_playlists_reuses_cached_tracks_when_snapshot_is_unchanged(self):
+        module = load_backup_module(self)
+        module.BACKUP_DIR = str(self.backup_dir)
+
+        cache_path = self.backup_dir / "playlist_track_cache.json"
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "cached-playlist": {
+                        "snapshot_id": "snapshot-1",
+                        "tracks": [
+                            {
+                                "id": "track-1",
+                                "name": "Song",
+                                "artists": [{"id": "artist-1", "name": "Artist"}],
+                                "album": {
+                                    "id": "album-1",
+                                    "name": "Album",
+                                    "release_date": "2026-01-01",
+                                },
+                                "duration_ms": 1000,
+                                "popularity": 50,
+                                "uri": "spotify:track:track-1",
+                            }
+                        ],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        class FakeSpotify:
+            def current_user_playlists(self):
+                return {
+                    "items": [
+                        {
+                            "id": "cached-playlist",
+                            "name": "Cached playlist",
+                            "description": "cached",
+                            "owner": {"id": "cookie.manca03"},
+                            "collaborative": False,
+                            "public": False,
+                            "snapshot_id": "snapshot-1",
+                            "items": {"total": 1},
+                        }
+                    ],
+                    "next": None,
+                }
+
+            def playlist_items(self, playlist_id):
+                raise RuntimeError("playlist_items should not be called when snapshot is unchanged")
+
+        playlists = module.backup_playlists(FakeSpotify())
+
+        self.assertEqual(len(playlists), 1)
+        self.assertEqual(playlists[0]["snapshot_id"], "snapshot-1")
+        self.assertEqual(playlists[0]["tracks"][0]["id"], "track-1")
 
 
 if __name__ == "__main__":

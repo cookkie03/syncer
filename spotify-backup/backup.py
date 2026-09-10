@@ -7,6 +7,7 @@ Run via Docker: docker run -v $(pwd)/data:/data spotify-backup
 import os
 import json
 import logging
+import shutil
 from datetime import datetime
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
@@ -24,6 +25,9 @@ REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'https://localhost:8888/callbac
 BACKUP_DIR = os.getenv('BACKUP_DIR', '/data/backup')
 CACHE_PATH = os.getenv('CACHE_PATH', '/data/.cache')
 CURRENT_BACKUP_NAME = 'spotify_backup_current.json'
+PLAYLIST_CACHE_NAME = 'playlist_track_cache.json'
+SNAPSHOT_DIR = os.getenv('SPOTIFY_SNAPSHOT_DIR')
+SNAPSHOT_RETENTION = max(1, int(os.getenv('SPOTIFY_SNAPSHOT_RETENTION', '14')))
 
 # Spotify scopes needed
 SCOPES = [
@@ -48,7 +52,36 @@ def get_spotify_client():
         cache_path=CACHE_PATH,
         open_browser=False,
     )
-    return Spotify(auth_manager=auth_manager)
+    return Spotify(
+        auth_manager=auth_manager,
+        retries=0,
+        status_retries=0,
+        backoff_factor=0,
+    )
+
+
+def save_json_file(filename, data):
+    """Atomically save JSON data to BACKUP_DIR."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+
+    path = os.path.join(BACKUP_DIR, filename)
+    temp_path = f'{path}.tmp'
+
+    with open(temp_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    os.replace(temp_path, path)
+    return path
+
+
+def load_json_file(filename, default):
+    """Load JSON data from BACKUP_DIR if present."""
+    path = os.path.join(BACKUP_DIR, filename)
+    if not os.path.exists(path):
+        return default
+
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
 
 def backup_profile(sp):
@@ -70,44 +103,78 @@ def backup_playlists(sp):
     """Backup all playlists with tracks."""
     logger.info("Backing up playlists...")
     playlists = []
+    playlist_cache = load_json_file(PLAYLIST_CACHE_NAME, {})
+    updated_cache = {}
     results = sp.current_user_playlists()
 
     while results:
         for playlist in results['items']:
             tracks = []
-            track_results = sp.playlist_items(playlist['id'])
-            while track_results:
-                for item in track_results['items']:
-                    if item['track']:
-                        track = item['track']
-                        tracks.append({
-                            'id': track['id'],
-                            'name': track['name'],
-                            'artists': [{'id': a['id'], 'name': a['name']} for a in track['artists']],
-                            'album': {
-                                'id': track['album']['id'],
-                                'name': track['album']['name'],
-                                'release_date': track['album'].get('release_date'),
-                            },
-                            'duration_ms': track['duration_ms'],
-                            'popularity': track['popularity'],
-                            'uri': track['uri'],
-                        })
-                if track_results['next']:
-                    track_results = sp.next(track_results)
-                else:
-                    track_results = None
-
-            playlists.append({
+            tracks_payload = playlist.get('tracks') or playlist.get('items') or {}
+            snapshot_id = playlist.get('snapshot_id')
+            playlist_record = {
                 'id': playlist['id'],
                 'name': playlist['name'],
                 'description': playlist['description'],
                 'owner': playlist['owner']['id'],
                 'collaborative': playlist['collaborative'],
                 'public': playlist['public'],
-                'tracks_count': playlist['tracks']['total'],
+                'snapshot_id': snapshot_id,
+                'tracks_count': tracks_payload.get('total', 0),
                 'tracks': tracks,
-            })
+            }
+
+            cached = playlist_cache.get(playlist['id'])
+            if cached and cached.get('snapshot_id') == snapshot_id:
+                tracks.extend(cached.get('tracks', []))
+                if 'tracks_error' in cached:
+                    playlist_record['tracks_error'] = cached['tracks_error']
+            else:
+                try:
+                    track_results = sp.playlist_items(playlist['id'], limit=100)
+                    while track_results:
+                        for item in track_results['items']:
+                            track = item.get('track')
+                            if track:
+                                track = item['track']
+                                album = track.get('album') or {}
+                                tracks.append({
+                                    'id': track.get('id'),
+                                    'name': track.get('name'),
+                                    'artists': [
+                                        {'id': artist.get('id'), 'name': artist.get('name')}
+                                        for artist in track.get('artists', [])
+                                    ],
+                                    'album': {
+                                        'id': album.get('id'),
+                                        'name': album.get('name'),
+                                        'release_date': album.get('release_date'),
+                                    },
+                                    'duration_ms': track.get('duration_ms'),
+                                    'popularity': track.get('popularity'),
+                                    'uri': track.get('uri'),
+                                })
+                        if track_results['next']:
+                            track_results = sp.next(track_results)
+                        else:
+                            track_results = None
+                except Exception as exc:
+                    logger.warning(
+                        "Skipping playlist items for %s (%s): %s",
+                        playlist['name'],
+                        playlist['id'],
+                        exc,
+                    )
+                    playlist_record['tracks_error'] = str(exc)
+
+            playlists.append(playlist_record)
+            updated_cache[playlist['id']] = {
+                'snapshot_id': snapshot_id,
+                'tracks': tracks,
+            }
+            if 'tracks_error' in playlist_record:
+                updated_cache[playlist['id']]['tracks_error'] = playlist_record['tracks_error']
+            save_json_file(PLAYLIST_CACHE_NAME, updated_cache)
 
         if results['next']:
             results = sp.next(results)
@@ -126,19 +193,23 @@ def backup_liked_tracks(sp):
     while results:
         for item in results['items']:
             track = item['track']
+            album = track.get('album') or {}
             tracks.append({
-                'id': track['id'],
-                'name': track['name'],
-                'artists': [{'id': a['id'], 'name': a['name']} for a in track['artists']],
+                'id': track.get('id'),
+                'name': track.get('name'),
+                'artists': [
+                    {'id': artist.get('id'), 'name': artist.get('name')}
+                    for artist in track.get('artists', [])
+                ],
                 'album': {
-                    'id': track['album']['id'],
-                    'name': track['album']['name'],
-                    'release_date': track['album'].get('release_date'),
+                    'id': album.get('id'),
+                    'name': album.get('name'),
+                    'release_date': album.get('release_date'),
                 },
-                'duration_ms': track['duration_ms'],
-                'popularity': track['popularity'],
-                'added_at': item['added_at'],
-                'uri': track['uri'],
+                'duration_ms': track.get('duration_ms'),
+                'popularity': track.get('popularity'),
+                'added_at': item.get('added_at'),
+                'uri': track.get('uri'),
             })
 
         if results['next']:
@@ -203,16 +274,22 @@ def backup_followed_artists(sp):
 
 
 def save_backup(data):
-    """Save backup to JSON file."""
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-
-    filename = os.path.join(BACKUP_DIR, CURRENT_BACKUP_NAME)
-    temp_path = f'{filename}.tmp'
-
-    with open(temp_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    os.replace(temp_path, filename)
+    """Save the current backup and a retained timestamped snapshot."""
+    filename = save_json_file(CURRENT_BACKUP_NAME, data)
+    snapshot_root = os.path.abspath(SNAPSHOT_DIR or os.path.join(BACKUP_DIR, 'snapshots'))
+    os.makedirs(snapshot_root, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y-%m-%dT%H%M%S%f')
+    snapshot_path = os.path.join(snapshot_root, f'{timestamp}-{CURRENT_BACKUP_NAME}')
+    shutil.copy2(filename, snapshot_path)
+    latest_dir = os.path.join(BACKUP_DIR, 'latest')
+    os.makedirs(latest_dir, exist_ok=True)
+    shutil.copy2(filename, os.path.join(latest_dir, CURRENT_BACKUP_NAME))
+    snapshots = sorted(
+        (os.path.join(snapshot_root, name) for name in os.listdir(snapshot_root)),
+        reverse=True,
+    )
+    for old_snapshot in snapshots[SNAPSHOT_RETENTION:]:
+        os.unlink(old_snapshot)
     logger.info(f"Backup saved to {filename}")
     return filename
 

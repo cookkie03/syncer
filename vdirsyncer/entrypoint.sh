@@ -1,7 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-CONFIG_DIR="${XDG_CONFIG_HOME:-/root/.config}/vdirsyncer"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/data}"
+export XDG_CONFIG_HOME
+CONFIG_DIR="$XDG_CONFIG_HOME/vdirsyncer"
 CONFIG_FILE="$CONFIG_DIR/config"
 CRONTAB_FILE="/tmp/vdirsyncer.cron"
 LOG_DIR="${LOG_DIR:-/logs}"
