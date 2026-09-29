@@ -11,7 +11,6 @@ LOG_FILE="${LOG_FILE:-$LOG_DIR/vdirsyncer.log}"
 RUN_STARTUP_DISCOVER="${VDIRSYNCER_RUN_STARTUP_DISCOVER:-1}"
 RUN_STARTUP_SYNC="${VDIRSYNCER_RUN_STARTUP_SYNC:-0}"
 RUN_SCHEDULE="${VDIRSYNCER_RUN_SCHEDULE:-1}"
-DISCOVER_MATCH_SCHEDULE="${VDIRSYNCER_DISCOVER_MATCH_SCHEDULE:-0 2 * * *}"
 
 mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
@@ -43,10 +42,8 @@ fi
 # ── Run initial discover + sync ────────────────────────────────────────────
 if [ "$RUN_STARTUP_DISCOVER" = "1" ]; then
   if [ -s "$GOOGLE_TOKEN_FILE" ]; then
-    echo "[entrypoint] Running initial vdirsyncer discover..."
-    yes | vdirsyncer discover || {
-      echo "[entrypoint] WARNING: discover failed — token may need refresh or server unreachable"
-    }
+    echo "[entrypoint] Checking initial calendar pairing..."
+    /app/discover-match.sh || echo "[entrypoint] WARNING: initial pairing failed — sync will stay blocked until it succeeds"
   else
     echo "[entrypoint] Startup discover skipped: missing $GOOGLE_TOKEN_FILE"
   fi
@@ -81,9 +78,7 @@ else
   CRON_EXPR="*/${SYNC_INTERVAL_MINUTES} * * * *"
 fi
 {
-  echo "$DISCOVER_MATCH_SCHEDULE [ -s \"$GOOGLE_TOKEN_FILE\" ] && /app/discover-match.sh 2>&1 || echo '[entrypoint] Daily discover skipped: missing Google token'"
-  echo "${CRON_EXPR} [ -s \"$GOOGLE_TOKEN_FILE\" ] && /app/sync-notify.sh 2>&1 || echo '[entrypoint] Scheduled sync skipped: missing Google token'"
+  echo "${CRON_EXPR} if [ -s \"$GOOGLE_TOKEN_FILE\" ]; then /app/sync-notify.sh; else echo '[entrypoint] Scheduled sync skipped: missing Google token'; fi"
 } > "$CRONTAB_FILE"
-echo "[entrypoint] Scheduling daily discover/match with expression: $DISCOVER_MATCH_SCHEDULE"
-echo "[entrypoint] Scheduling sync every ${SYNC_INTERVAL_MINUTES} minute(s) via supercronic"
+echo "[entrypoint] Scheduling pairing check and sync every ${SYNC_INTERVAL_MINUTES} minute(s) via supercronic"
 exec supercronic "$CRONTAB_FILE"

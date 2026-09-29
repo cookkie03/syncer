@@ -49,7 +49,6 @@ services:
       - VDIRSYNCER_RUN_STARTUP_DISCOVER=1
       - VDIRSYNCER_RUN_STARTUP_SYNC=${VDIRSYNCER_RUN_STARTUP_SYNC:-1}
       - VDIRSYNCER_RUN_SCHEDULE=${VDIRSYNCER_RUN_SCHEDULE:-1}
-      - VDIRSYNCER_DISCOVER_MATCH_SCHEDULE=${VDIRSYNCER_DISCOVER_MATCH_SCHEDULE:-0 2 * * *}
     healthcheck:
       test: ["CMD", "python", "-c", "import vdirsyncer; print('ok')"]
       interval: 5m

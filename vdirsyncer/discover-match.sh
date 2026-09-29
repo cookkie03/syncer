@@ -4,7 +4,7 @@ set -eu
 LOCK_DIR=/tmp/vdirsyncer-discover-match.lock
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   echo "[discover-match] another discover is already running"
-  exit 0
+  exit 1
 fi
 trap 'rmdir "$LOCK_DIR"' EXIT
 

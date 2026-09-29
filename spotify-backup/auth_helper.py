@@ -24,14 +24,29 @@ import ssl
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlencode, urlparse
-import requests
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 import json
 import time
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_DIR / 'data'
-CLIENT_ID = 'e8c6512e5dc14d47b0e86afa18c86b50'
+
+
+def project_setting(name: str, default: str = '') -> str:
+    """Use host environment first, then the portable project .env file."""
+    if name in os.environ:
+        return os.environ[name]
+    env_file = PROJECT_DIR.parent / '.env'
+    if env_file.exists():
+        for line in env_file.read_text(encoding='utf-8').splitlines():
+            if line.startswith(name + '='):
+                return line.split('=', 1)[1].strip().strip('"').strip("'")
+    return default
+
+
+CLIENT_ID = project_setting('SPOTIFY_CLIENT_ID')
 
 SCOPES = [
     'user-read-private',
@@ -89,7 +104,8 @@ def write_token_cache(token_data: dict) -> Path:
     cache_path = resolved_cache_path()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     token_data['expires_at'] = token_data.get('expires_in', 3600) + int(time.time())
-    with open(cache_path, 'w', encoding='utf-8') as f:
+    temporary = cache_path.with_name(cache_path.name + '.tmp')
+    with open(temporary, 'w', encoding='utf-8') as f:
         json.dump({
             'access_token': token_data['access_token'],
             'token_type': token_data.get('token_type', 'Bearer'),
@@ -98,6 +114,8 @@ def write_token_cache(token_data: dict) -> Path:
             'refresh_token': token_data.get('refresh_token'),
             'scope': ' '.join(SCOPES),
         }, f, indent=2)
+    temporary.chmod(0o600)
+    temporary.replace(cache_path)
     return cache_path
 
 
@@ -112,11 +130,18 @@ def exchange_code_for_token(code: str, code_verifier: str, redirect_uri: str) ->
         'code_verifier': code_verifier,
     }
 
-    resp = requests.post(token_url, data=data)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Token request failed: {resp.text}")
+    request = Request(
+        token_url,
+        data=urlencode(data).encode('utf-8'),
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.load(response)
+    except HTTPError as exc:
+        raise RuntimeError(f"Spotify token request failed with HTTP {exc.code}") from exc
 
-    return write_token_cache(resp.json())
+    return write_token_cache(payload)
 
 
 def handle_callback_result(code: str | None, error: str | None, code_verifier: str, redirect_uri: str) -> bool:
@@ -198,7 +223,9 @@ class CallbackHandler(BaseHTTPRequestHandler):
 
 def main():
     # ── Redirect URI from env or default ──────────────────────────────
-    redirect_uri = os.environ.get('SPOTIFY_REDIRECT_URI', DEFAULT_REDIRECT_URI)
+    if not CLIENT_ID:
+        raise RuntimeError('SPOTIFY_CLIENT_ID is missing from .env or the host environment')
+    redirect_uri = project_setting('SPOTIFY_REDIRECT_URI', DEFAULT_REDIRECT_URI)
     parsed = urlparse(redirect_uri)
     is_https = parsed.scheme == 'https'
     is_localhost = parsed.hostname in ('localhost', '127.0.0.1')

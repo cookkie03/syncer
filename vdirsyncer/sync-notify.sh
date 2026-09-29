@@ -23,13 +23,22 @@ OUTPUT_FILE="/tmp/vdirsyncer_output"
 # We always run with -v (verbose) so the output contains "Copying …" lines.
 # If errors are found we re-run with -vdebug to get tracebacks (see below).
 set +e
-python3 /app/sync_wrapper.py sync > "$OUTPUT_FILE" 2>&1
-EXIT_CODE=$?
+PAIRING_OK=1
+# Recheck the pairing before every sync. A failed or ambiguous pairing blocks
+# all writes and is handled by the normal error notification below.
+if /app/discover-match.sh > "$OUTPUT_FILE" 2>&1; then
+    python3 /app/sync_wrapper.py sync >> "$OUTPUT_FILE" 2>&1
+    EXIT_CODE=$?
+else
+    EXIT_CODE=$?
+    PAIRING_OK=0
+    echo "error: calendar pairing failed; sync was not run" >> "$OUTPUT_FILE"
+fi
 
 # vdirsyncer 0.20.x has a concurrency bug where async Google Calendar sessions
 # get closed mid-run. Retry only the specific failing collection(s) one at a
 # time — no concurrency, so the race condition can't recur.
-if [ "$EXIT_CODE" -ne 0 ] && grep -q "Session is closed" "$OUTPUT_FILE"; then
+if [ "$PAIRING_OK" -eq 1 ] && [ "$EXIT_CODE" -ne 0 ] && grep -q "Session is closed" "$OUTPUT_FILE"; then
     RETRY_FILE="/tmp/vdirsyncer_retry"
     FAILED_FILE="/tmp/vdirsyncer_failed_collections"
     # Extract failing collection names, e.g. "caldav_gcal/Cura personale"
