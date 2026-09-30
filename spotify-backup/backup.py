@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
-REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'https://localhost:8888/callback')
+REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://127.0.0.1:9000/callback')
 BACKUP_DIR = os.getenv('BACKUP_DIR', '/data/backup')
 CACHE_PATH = os.getenv('CACHE_PATH', '/data/.cache')
 CURRENT_BACKUP_NAME = 'spotify_backup_current.json'
@@ -99,7 +99,7 @@ def backup_profile(sp):
     }
 
 
-def backup_playlists(sp):
+def backup_playlists(sp, user_id=None):
     """Backup all playlists with tracks."""
     logger.info("Backing up playlists...")
     playlists = []
@@ -125,10 +125,12 @@ def backup_playlists(sp):
             }
 
             cached = playlist_cache.get(playlist['id'])
-            if cached and cached.get('snapshot_id') == snapshot_id:
+            if user_id and playlist_record['owner'] != user_id and not playlist_record['collaborative']:
+                if cached and cached.get('snapshot_id') == snapshot_id:
+                    tracks.extend(cached.get('tracks', []))
+                playlist_record['tracks_error'] = 'Spotify API limits playlist items to owners and collaborators'
+            elif cached and cached.get('snapshot_id') == snapshot_id and not cached.get('tracks_error'):
                 tracks.extend(cached.get('tracks', []))
-                if 'tracks_error' in cached:
-                    playlist_record['tracks_error'] = cached['tracks_error']
             else:
                 try:
                     track_results = sp.playlist_items(playlist['id'], limit=100)
@@ -159,6 +161,8 @@ def backup_playlists(sp):
                         else:
                             track_results = None
                 except Exception as exc:
+                    if cached and cached.get('snapshot_id') == snapshot_id and cached.get('tracks'):
+                        tracks[:] = cached['tracks']
                     logger.warning(
                         "Skipping playlist items for %s (%s): %s",
                         playlist['name'],
@@ -310,19 +314,28 @@ def main():
 
     try:
         sp = get_spotify_client()
+        profile = backup_profile(sp)
 
         backup_data = {
             'timestamp': datetime.now().isoformat(),
-            'profile': backup_profile(sp),
-            'playlists': backup_playlists(sp),
+            'profile': profile,
+            'playlists': backup_playlists(sp, profile.get('id')),
             'liked_tracks': backup_liked_tracks(sp),
             'saved_albums': backup_saved_albums(sp),
             'followed_artists': backup_followed_artists(sp),
         }
 
+        incomplete = [playlist for playlist in backup_data['playlists'] if playlist.get('tracks_error')]
+        backup_data['playlist_items_unavailable'] = len(incomplete)
         save_backup(backup_data)
 
-        logger.info("Backup complete!")
+        if incomplete:
+            logger.warning(
+                'Backup saved with access limits: items unavailable for %d playlist(s)',
+                len(incomplete),
+            )
+        else:
+            logger.info("Backup complete!")
         logger.info(f"  - Profile: {backup_data['profile']['display_name']}")
         logger.info(f"  - Playlists: {len(backup_data['playlists'])}")
         logger.info(f"  - Liked tracks: {len(backup_data['liked_tracks'])}")

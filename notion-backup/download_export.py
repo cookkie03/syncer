@@ -10,8 +10,8 @@ Flow:
 """
 
 import base64
+import json
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -22,14 +22,17 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 # ── Config ────────────────────────────────────────────────────────────────
-for _p in ["/shared", str(Path(__file__).resolve().parent.parent / "shared")]:
+for _p in ["/app/project-settings", str(Path(__file__).resolve().parent.parent / "settings")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 from config_loader import cfg, env  # noqa: E402
+from google_auth import load_google_client, token_matches_client  # noqa: E402
 
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = env("TELEGRAM_CHAT_ID")
 TOKEN_FILE         = env("GOOGLE_GMAIL_TOKEN_FILE", "/data/token/google_gmail.json")
+GOOGLE_CLIENT_JSON_FILE = env("GOOGLE_CLIENT_JSON_FILE", "/run/syncer-google-client/client_secret.json")
+GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 
 BACKUP_DIR         = Path(cfg("notion_backup.backup_dir", "/backup"))
 STATE_FILE         = BACKUP_DIR / ".last_notified_msg_id"
@@ -60,17 +63,13 @@ def notify(title: str, message: str) -> None:
 
 
 def get_gmail_service():
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            raise Exception(
-                f"Gmail token not found or invalid at {TOKEN_FILE}. "
-                "Please run authorize-google.py first."
-            )
+    client = load_google_client(Path(GOOGLE_CLIENT_JSON_FILE))
+    token = json.loads(Path(TOKEN_FILE).read_text(encoding="utf-8"))
+    if not token_matches_client(token, client, ("token", "refresh_token"), GMAIL_SCOPE):
+        raise RuntimeError("Gmail token does not match setup/google/client_secret.json; run setup/pc_auth.sh --include-gmail")
+    creds = Credentials.from_authorized_user_info({**token, **client}, [GMAIL_SCOPE])
+    if not creds.valid:
+        creds.refresh(Request())
     return build("gmail", "v1", credentials=creds)
 
 

@@ -1,4 +1,6 @@
 *
 !Dockerfile
 !backup.py
+!download_export.py
+!telegram_bot.py
 !entrypoint.sh

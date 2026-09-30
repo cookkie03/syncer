@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install supercronic
 ARG SUPERCRONIC_VERSION=0.2.29
 ARG TARGETARCH
-RUN case "${TARGETARCH}" in \
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
       amd64) ARCH="amd64" ;; \
       arm64) ARCH="arm64" ;; \
       *) echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
@@ -16,7 +16,7 @@ RUN case "${TARGETARCH}" in \
       -o /usr/local/bin/supercronic && \
     chmod +x /usr/local/bin/supercronic
 
-RUN pip install --no-cache-dir spotipy requests pyyaml
+RUN pip install --no-cache-dir spotipy requests
 
 WORKDIR /app
 COPY backup.py /app/backup.py

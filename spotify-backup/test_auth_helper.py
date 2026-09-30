@@ -27,6 +27,12 @@ def load_auth_helper_module(testcase: unittest.TestCase):
 
 
 class SpotifyAuthHelperTests(unittest.TestCase):
+    def test_callback_parser_keeps_oauth_state(self):
+        module = load_auth_helper_module(self)
+        params = module.extract_callback_params('/callback?code=abc&state=nonce')
+        self.assertEqual(params['code'], 'abc')
+        self.assertEqual(params['state'], 'nonce')
+
     def test_default_cache_path_lives_inside_repo_data_dir(self):
         module = load_auth_helper_module(self)
         self.assertTrue(hasattr(module, "PROJECT_DIR"))

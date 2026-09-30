@@ -14,10 +14,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-for shared_path in ["/shared", str(Path(__file__).resolve().parent.parent / "shared")]:
+for shared_path in ["/app/project-settings", str(Path(__file__).resolve().parent.parent / "settings")]:
     if shared_path not in sys.path:
         sys.path.insert(0, shared_path)
 from config_loader import cfg  # noqa: E402
+from google_auth import load_google_client, token_matches_client  # noqa: E402
 
 
 logging.basicConfig(
@@ -27,23 +28,12 @@ logging.basicConfig(
 )
 log = logging.getLogger("google-contacts-backup")
 
-_MISSING = object()
 GOOGLE_CONTACTS_SCOPE = "https://www.googleapis.com/auth/contacts"
 GOOGLE_CONTACTS_READONLY_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"
 
-
-def cfg_compat(primary: str, legacy: str, default, cast=str):
-    value = cfg(primary, _MISSING, cast)
-    if value is not _MISSING:
-        return value
-    return cfg(legacy, default, cast)
-
-
-BACKUP_DIR = Path(
-    cfg_compat("google_contacts_backup.backup_dir", "carddav_google_contacts.backup_dir", os.environ.get("BACKUP_DIR", "/backup"))
-)
-BACKUP_INTERVAL_MINUTES = cfg_compat("google_contacts_backup.backup_interval_minutes", "carddav_google_contacts.backup_interval_minutes", 1440, int)
-GOOGLE_API_DELAY = cfg_compat("google_contacts_backup.google_api_delay", "carddav_google_contacts.google_api_delay", 0.5, float)
+BACKUP_DIR = Path(cfg("google_contacts_backup.backup_dir", os.environ.get("BACKUP_DIR", "/backup")))
+BACKUP_INTERVAL_MINUTES = cfg("google_contacts_backup.backup_interval_minutes", 1440, int)
+GOOGLE_API_DELAY = cfg("google_contacts_backup.google_api_delay", 0.5, float)
 
 
 def require_env(name: str) -> str:
@@ -58,7 +48,7 @@ def load_google_token_payload(token_file: str | Path) -> dict:
 
 
 def google_contacts_scopes_from_token_payload(token_payload: dict) -> list[str]:
-    raw_scope = token_payload.get("scope")
+    raw_scope = token_payload.get("scope") or token_payload.get("scopes")
 
     if isinstance(raw_scope, str):
         scopes = [scope for scope in raw_scope.split() if scope]
@@ -98,21 +88,23 @@ def atomic_write_json(path: Path, payload: dict) -> None:
 
 
 def update_latest_pointer(backup_root: Path, snapshot_name: str, snapshot_dir: Path) -> None:
-    latest_json = backup_root / "latest.json"
+    latest_link = backup_root / "latest"
+    link_target = snapshot_dir.relative_to(backup_root)
+    if latest_link.is_dir() and not latest_link.is_symlink():
+        archive = backup_root / ("legacy-latest-" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f"))
+        latest_link.rename(archive)
+    elif latest_link.is_symlink() or latest_link.exists():
+        latest_link.unlink()
+    latest_link.symlink_to(link_target)
+
     atomic_write_json(
-        latest_json,
+        backup_root / "latest.json",
         {
             "snapshot": snapshot_name,
             "snapshot_dir": str(snapshot_dir),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
     )
-
-    latest_link = backup_root / "latest"
-    link_target = snapshot_dir.relative_to(backup_root)
-    if latest_link.is_symlink() or latest_link.exists():
-        latest_link.unlink()
-    latest_link.symlink_to(link_target)
 
 
 def load_previous_manifest(backup_root: Path) -> tuple[str | None, dict]:
@@ -134,6 +126,11 @@ def load_previous_manifest(backup_root: Path) -> tuple[str | None, dict]:
 
 def write_incremental_snapshot(backup_root: Path, contacts: dict[str, str], timestamp: str | None = None) -> dict:
     backup_root.mkdir(parents=True, exist_ok=True)
+    previous_snapshot, previous_manifest = load_previous_manifest(backup_root)
+    previous_contacts = previous_manifest.get("contacts", {})
+    if previous_contacts and not contacts:
+        raise RuntimeError("Google returned zero contacts; previous backup remains current")
+
     snapshots_root = backup_root / "snapshots"
     snapshots_root.mkdir(parents=True, exist_ok=True)
 
@@ -141,9 +138,6 @@ def write_incremental_snapshot(backup_root: Path, contacts: dict[str, str], time
     snapshot_dir = snapshots_root / snapshot_name
     contacts_dir = snapshot_dir / "contacts"
     contacts_dir.mkdir(parents=True, exist_ok=True)
-
-    previous_snapshot, previous_manifest = load_previous_manifest(backup_root)
-    previous_contacts = previous_manifest.get("contacts", {})
 
     new_count = 0
     changed_count = 0
@@ -291,8 +285,12 @@ class GoogleContactsClient:
 
         token_file = require_env("GOOGLE_CONTACTS_TOKEN_FILE")
         token_payload = load_google_token_payload(token_file)
+        client_path = Path(require_env("GOOGLE_CLIENT_JSON_FILE"))
+        client = load_google_client(client_path)
+        if not token_matches_client(token_payload, client, ("token", "refresh_token"), GOOGLE_CONTACTS_SCOPE):
+            raise RuntimeError("Google Contacts token does not match setup/google/client_secret.json")
         scopes = google_contacts_scopes_from_token_payload(token_payload)
-        credentials = Credentials.from_authorized_user_info(token_payload, scopes)
+        credentials = Credentials.from_authorized_user_info({**token_payload, **client}, scopes)
         if not credentials.valid and credentials.refresh_token:
             credentials.refresh(Request())
         log.info("Using Google Contacts token scopes: %s", " ".join(scopes))

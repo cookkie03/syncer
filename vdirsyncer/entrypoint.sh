@@ -8,23 +8,22 @@ CONFIG_FILE="$CONFIG_DIR/config"
 CRONTAB_FILE="/tmp/vdirsyncer.cron"
 LOG_DIR="${LOG_DIR:-/logs}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/vdirsyncer.log}"
-RUN_STARTUP_DISCOVER="${VDIRSYNCER_RUN_STARTUP_DISCOVER:-1}"
 RUN_STARTUP_SYNC="${VDIRSYNCER_RUN_STARTUP_SYNC:-0}"
 RUN_SCHEDULE="${VDIRSYNCER_RUN_SCHEDULE:-1}"
-DISCOVER_MATCH_SCHEDULE="${VDIRSYNCER_DISCOVER_MATCH_SCHEDULE:-0 2 * * *}"
 
 mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
+# /tmp survives a process restart in the same container. No sync jobs are
+# running yet, so clear locks left by an abrupt previous stop.
+rmdir /tmp/vdirsyncer-sync.lock 2>/dev/null || true
 
 # ── Validate required environment variables ────────────────────────────────
 : "${CALDAV_URL:?CALDAV_URL is required}"
 : "${CALDAV_USERNAME:?CALDAV_USERNAME is required}"
 : "${CALDAV_PASSWORD:?CALDAV_PASSWORD is required}"
 : "${GOOGLE_TOKEN_FILE:?GOOGLE_TOKEN_FILE is required}"
-: "${GOOGLE_CLIENT_ID:?GOOGLE_CLIENT_ID is required}"
-: "${GOOGLE_CLIENT_SECRET:?GOOGLE_CLIENT_SECRET is required}"
-: "${CALENDAR_MAP_FILE:=/app/calendar-map.json}"
+: "${CALENDAR_MAP_FILE:=/app/project-settings/calendar-pairings.json}"
 
 # Default sync interval: 60 minutes
 SYNC_INTERVAL_MINUTES="${SYNC_INTERVAL_MINUTES:-60}"
@@ -40,20 +39,7 @@ if ! python3 -c "import socket; socket.setdefaulttimeout(3); socket.getaddrinfo(
     printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
 fi
 
-# ── Run initial discover + sync ────────────────────────────────────────────
-if [ "$RUN_STARTUP_DISCOVER" = "1" ]; then
-  if [ -s "$GOOGLE_TOKEN_FILE" ]; then
-    echo "[entrypoint] Running initial vdirsyncer discover..."
-    yes | vdirsyncer discover || {
-      echo "[entrypoint] WARNING: discover failed — token may need refresh or server unreachable"
-    }
-  else
-    echo "[entrypoint] Startup discover skipped: missing $GOOGLE_TOKEN_FILE"
-  fi
-else
-  echo "[entrypoint] Startup discover disabled (VDIRSYNCER_RUN_STARTUP_DISCOVER=$RUN_STARTUP_DISCOVER)"
-fi
-
+# ── The sync wrapper performs discovery and pairing before any write ──────
 if [ "$RUN_STARTUP_SYNC" = "1" ]; then
   if [ -s "$GOOGLE_TOKEN_FILE" ]; then
     echo "[entrypoint] Running initial vdirsyncer sync..."
@@ -66,24 +52,33 @@ else
 fi
 
 # ── Build crontab and hand off to supercronic ─────────────────────────────
-# */N is only valid when N <= max field value (59 for minutes).
-# For intervals >= 60 min, convert to hours: every N hours at minute 0.
+# Accept only exact cron intervals; do not silently shorten an interval.
 if [ "$RUN_SCHEDULE" != "1" ]; then
   echo "[entrypoint] Scheduled sync disabled (VDIRSYNCER_RUN_SCHEDULE=$RUN_SCHEDULE)"
-  echo "[entrypoint] Container will stay idle until you run /app/bootstrap.sh or enable scheduling"
+  echo "[entrypoint] Container will stay idle until you run /app/sync-notify.sh or enable scheduling"
   exec sh -c 'trap : TERM INT; while true; do sleep 86400; done'
 fi
 
+if ! [[ "$SYNC_INTERVAL_MINUTES" =~ ^[0-9]+$ ]] || [ "$SYNC_INTERVAL_MINUTES" -lt 1 ] || [ "$SYNC_INTERVAL_MINUTES" -gt 1440 ]; then
+  echo "[entrypoint] SYNC_INTERVAL_MINUTES must be 1..1440" >&2
+  exit 1
+fi
 if [ "$SYNC_INTERVAL_MINUTES" -ge 60 ]; then
+  if [ $((SYNC_INTERVAL_MINUTES % 60)) -ne 0 ] || [ $((24 % (SYNC_INTERVAL_MINUTES / 60))) -ne 0 ]; then
+    echo "[entrypoint] SYNC_INTERVAL_MINUTES must evenly divide 24 hours" >&2
+    exit 1
+  fi
   SYNC_HOURS=$(( SYNC_INTERVAL_MINUTES / 60 ))
   CRON_EXPR="0 */${SYNC_HOURS} * * *"
 else
+  if [ $((60 % SYNC_INTERVAL_MINUTES)) -ne 0 ]; then
+    echo "[entrypoint] SYNC_INTERVAL_MINUTES must evenly divide 60 minutes" >&2
+    exit 1
+  fi
   CRON_EXPR="*/${SYNC_INTERVAL_MINUTES} * * * *"
 fi
 {
-  echo "$DISCOVER_MATCH_SCHEDULE [ -s \"$GOOGLE_TOKEN_FILE\" ] && /app/discover-match.sh 2>&1 || echo '[entrypoint] Daily discover skipped: missing Google token'"
-  echo "${CRON_EXPR} [ -s \"$GOOGLE_TOKEN_FILE\" ] && /app/sync-notify.sh 2>&1 || echo '[entrypoint] Scheduled sync skipped: missing Google token'"
+  echo "${CRON_EXPR} if [ -s \"$GOOGLE_TOKEN_FILE\" ]; then /app/sync-notify.sh; else echo '[entrypoint] Scheduled sync skipped: missing Google token'; fi"
 } > "$CRONTAB_FILE"
-echo "[entrypoint] Scheduling daily discover/match with expression: $DISCOVER_MATCH_SCHEDULE"
-echo "[entrypoint] Scheduling sync every ${SYNC_INTERVAL_MINUTES} minute(s) via supercronic"
+echo "[entrypoint] Scheduling pairing check and sync every ${SYNC_INTERVAL_MINUTES} minute(s) via supercronic"
 exec supercronic "$CRONTAB_FILE"

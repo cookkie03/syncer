@@ -105,6 +105,24 @@ class IncrementalBackupTests(unittest.TestCase):
         latest = json.loads(latest_path.read_text(encoding="utf-8"))
         self.assertEqual(latest["snapshot"], "20260717_130000")
 
+    def test_preserves_copied_latest_directory_before_creating_pointer(self):
+        module = load_backup_module(self)
+        old_latest = self.backup_dir / "latest"
+        old_latest.mkdir()
+        (old_latest / "existing-contact.vcf").write_text("old backup", encoding="utf-8")
+
+        module.write_incremental_snapshot(
+            self.backup_dir,
+            {"uid-1": "BEGIN:VCARD\nFN:Alice\nEND:VCARD\n"},
+            timestamp="20260930_200000",
+        )
+
+        self.assertTrue(old_latest.is_symlink())
+        self.assertTrue((old_latest / "contacts" / "uid-1.vcf").is_file())
+        archives = list(self.backup_dir.glob("legacy-latest-*"))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual((archives[0] / "existing-contact.vcf").read_text(), "old backup")
+
     def test_reads_scope_string_from_google_token_payload(self):
         module = load_backup_module(self)
         scopes = module.google_contacts_scopes_from_token_payload(
@@ -116,6 +134,25 @@ class IncrementalBackupTests(unittest.TestCase):
         module = load_backup_module(self)
         scopes = module.google_contacts_scopes_from_token_payload({})
         self.assertEqual(scopes, ["https://www.googleapis.com/auth/contacts"])
+
+    def test_google_auth_scopes_list_is_respected(self):
+        module = load_backup_module(self)
+        scopes = module.google_contacts_scopes_from_token_payload(
+            {"scopes": ["https://www.googleapis.com/auth/contacts.readonly"]}
+        )
+        self.assertEqual(scopes, ["https://www.googleapis.com/auth/contacts.readonly"])
+
+    def test_empty_api_result_does_not_replace_previous_snapshot(self):
+        module = load_backup_module(self)
+        module.write_incremental_snapshot(
+            self.backup_dir,
+            {"uid-1": "BEGIN:VCARD\nFN:Alice\nEND:VCARD\n"},
+            timestamp="20260717_120000",
+        )
+        with self.assertRaisesRegex(RuntimeError, "zero contacts"):
+            module.write_incremental_snapshot(self.backup_dir, {}, timestamp="20260717_130000")
+        latest = json.loads((self.backup_dir / "latest.json").read_text(encoding="utf-8"))
+        self.assertEqual(latest["snapshot"], "20260717_120000")
 
 
 if __name__ == "__main__":
