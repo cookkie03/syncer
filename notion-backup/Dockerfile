@@ -1,4 +1,4 @@
-﻿FROM python:3.12-slim
+FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl \
@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG SUPERCRONIC_VERSION=0.2.29
 ARG TARGETARCH
-RUN case "$TARGETARCH" in \
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
       amd64) ARCH="amd64" ;; \
       arm64) ARCH="arm64" ;; \
       *) echo "Unsupported arch: $TARGETARCH" && exit 1 ;; \

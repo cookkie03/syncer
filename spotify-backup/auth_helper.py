@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
-"""
-Spotify Auth Helper - uses the official Authorization Code with PKCE flow.
-No client secret needed.
+"""Authorize Spotify with PKCE on the PC and save the portable token cache.
 
-Two modes:
-  1. Local dev (http://localhost) — no SSL, no tunnel needed.
-     Set SPOTIFY_REDIRECT_URI=http://localhost:9000/callback and register that URI.
-  2. Tunnel mode (https://) — use when Spotify rejects http://localhost.
-     Set SPOTIFY_REDIRECT_URI to your public HTTPS tunnel URL
-     (e.g. https://abc123.localhost.run/callback from ssh -R 80:localhost:9000 localhost.run).
-     Then run: python ./spotify-backup/auth_helper.py
-     In another terminal: ssh -R 80:localhost:9000 localhost.run
-
-Run on the HOST machine (not in Docker).
+The redirect URI comes from the project .env. Local HTTPS needs cert.pem/key.pem;
+a remote HTTPS redirect needs an independently configured tunnel to this PC.
 """
 
 import os
@@ -30,6 +20,9 @@ import json
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'setup'))
+from project_env import load_project_env
+
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_DIR / 'data'
 
@@ -40,9 +33,7 @@ def project_setting(name: str, default: str = '') -> str:
         return os.environ[name]
     env_file = PROJECT_DIR.parent / '.env'
     if env_file.exists():
-        for line in env_file.read_text(encoding='utf-8').splitlines():
-            if line.startswith(name + '='):
-                return line.split('=', 1)[1].strip().strip('"').strip("'")
+        return load_project_env(env_file).get(name, default)
     return default
 
 
@@ -96,6 +87,7 @@ def extract_callback_params(callback_url: str) -> dict[str, str | None]:
     return {
         'code': params.get('code', [None])[0],
         'error': params.get('error', [None])[0],
+        'state': params.get('state', [None])[0],
     }
 
 
@@ -180,11 +172,15 @@ class CallbackHandler(BaseHTTPRequestHandler):
     """Handle Spotify OAuth callback on localhost."""
 
     code_verifier = None
+    expected_state = None
     redirect_uri = None  # set in main() from SPOTIFY_REDIRECT_URI env
     auth_success = False
 
     def do_GET(self):
         params = extract_callback_params(self.path)
+        if params['state'] != CallbackHandler.expected_state:
+            self.send_error(400, 'OAuth state mismatch')
+            return
         success = handle_callback_result(
             params['code'],
             params['error'],
@@ -246,6 +242,8 @@ def main():
     code_verifier = generate_code_verifier()
     code_challenge = generate_code_challenge(code_verifier)
     CallbackHandler.code_verifier = code_verifier
+    CallbackHandler.expected_state = secrets.token_urlsafe(24)
+    CallbackHandler.auth_success = False
 
     # Build authorization URL
     auth_params = {
@@ -254,36 +252,33 @@ def main():
         'redirect_uri': redirect_uri,
         'code_challenge_method': 'S256',
         'code_challenge': code_challenge,
+        'state': CallbackHandler.expected_state,
         'scope': ' '.join(SCOPES),
     }
     auth_url = 'https://accounts.spotify.com/authorize?' + urlencode(auth_params)
 
-    print("1. Open this URL in a browser on any device that can reach Spotify:")
-    print(auth_url)
-    if should_open_browser():
-        print("\nOpening local browser because SPOTIFY_AUTH_OPEN_BROWSER is enabled...")
-        webbrowser.open(auth_url)
-
-    print("\n2. Paste the full callback URL here and press Enter,")
-    print("   or press Enter on an empty line to wait for the callback on this machine.")
-    pasted_callback = input("> ").strip()
-
-    if pasted_callback:
-        params = extract_callback_params(pasted_callback)
-        if handle_callback_result(params['code'], params['error'], code_verifier, redirect_uri):
-            print("\nAuth complete!")
-            print(f"Token location: {resolved_cache_path()}")
-            return
-        print("\nAuth failed!")
-        sys.exit(1)
-
     listen_port = int(os.environ.get('SPOTIFY_AUTH_PORT', parsed.port or 9000))
     server = HTTPServer(('localhost', listen_port), CallbackHandler)
+    if is_https and is_localhost:
+        cert = PROJECT_DIR / 'cert.pem'
+        key = PROJECT_DIR / 'key.pem'
+        if not cert.is_file() or not key.is_file():
+            server.server_close()
+            raise RuntimeError('HTTPS localhost requires spotify-backup/cert.pem and key.pem')
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile=str(cert), keyfile=str(key))
+        server.socket = context.wrap_socket(server.socket, server_side=True)
     CallbackHandler.redirect_uri = redirect_uri
 
-    print(f"3. Waiting for callback on {redirect_uri} ...")
-    server.handle_request()
-    server.server_close()
+    print("Open this URL in a browser on the PC:")
+    print(auth_url)
+    print(f"Waiting for callback on {redirect_uri} ...")
+    if should_open_browser():
+        webbrowser.open(auth_url)
+    try:
+        server.handle_request()
+    finally:
+        server.server_close()
 
     if CallbackHandler.auth_success:
         print("\nAuth complete!")

@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
 import sys
 
+from render_config import load_calendar_map
 
-CALENDAR_MAP_FILE = pathlib.Path("/app/calendar-map.json")
+
+CALENDAR_MAP_FILE = pathlib.Path(os.environ.get("CALENDAR_MAP_FILE", "/app/project-settings/calendar-pairings.json"))
 DISCOVER_LINE = re.compile(r'^\s*-\s+"(?P<id>[^"]+)"\s+\("(?P<name>.*)"\)$')
 
 
@@ -43,7 +46,7 @@ def run_discover() -> str:
         check=False,
         capture_output=True,
         text=True,
-        input="y\n" * 100,
+        input="\n" * 100,
     )
     output = result.stdout
     if result.returncode == 0 and "caldav_calendars:" in output and "google_calendars:" in output:
@@ -51,13 +54,8 @@ def run_discover() -> str:
     raise RuntimeError(output + ("\n" if output else "") + result.stderr)
 
 
-def load_map(path: pathlib.Path) -> list[dict[str, str]]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def refresh_map(entries: list[dict[str, str]], caldav: dict[str, str], google: dict[str, str]) -> tuple[list[dict[str, str]], list[str]]:
+def refresh_map(entries: list[dict[str, str]], caldav: dict[str, str], google: dict[str, str]) -> list[dict[str, str]]:
     updated: list[dict[str, str]] = []
-    warnings: list[str] = []
 
     missing = []
     for entry in entries:
@@ -75,12 +73,7 @@ def refresh_map(entries: list[dict[str, str]], caldav: dict[str, str], google: d
     if missing:
         raise RuntimeError("Pairing incomplete; sync stopped. Missing " + ", ".join(missing))
 
-    known_names = {entry["name"] for entry in entries}
-    for name in sorted((set(caldav) & set(google)) - known_names):
-        updated.append({"name": name, "caldav": caldav[name], "google": google[name]})
-        warnings.append(f"Added new matching calendar: {name}")
-
-    return updated, warnings
+    return updated
 
 
 def main() -> int:
@@ -90,16 +83,12 @@ def main() -> int:
     args = parser.parse_args()
 
     map_file = pathlib.Path(args.map_file)
-    entries = load_map(map_file)
+    entries = load_calendar_map(map_file)
     output = run_discover()
     caldav, google = parse_discover_output(output)
-    refreshed, warnings = refresh_map(entries, caldav, google)
+    refreshed = refresh_map(entries, caldav, google)
 
     print(json.dumps(refreshed, indent=2, ensure_ascii=False))
-    if warnings:
-        print("\nWarnings:", file=sys.stderr)
-        for warning in warnings:
-            print(f"- {warning}", file=sys.stderr)
 
     if args.write:
         temporary = map_file.with_name(map_file.name + ".tmp")

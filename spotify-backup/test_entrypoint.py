@@ -43,7 +43,7 @@ class SpotifyEntrypointTests(unittest.TestCase):
         minimal_env = {
             "PATH": f"{self.bin_dir}:{os.environ['PATH']}",
             "LOG_DIR": str(self.logs_dir),
-            "BACKUP_INTERVAL_MINUTES": "240",
+            "SPOTIFY_BACKUP_SCHEDULE": "0 */4 * * *",
             "BACKUP_DIR": str(self.base / "data" / "backup"),
             "SPOTIFY_CLIENT_ID": "client",
             "SPOTIFY_CLIENT_SECRET": "secret",
@@ -59,7 +59,7 @@ class SpotifyEntrypointTests(unittest.TestCase):
             check=False,
         )
 
-        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("Scheduling backup with expression: 0 */4 * * *", completed.stdout)
 
         log_file = self.logs_dir / "spotify-backup.log"

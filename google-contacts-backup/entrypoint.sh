@@ -1,7 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-BACKUP_INTERVAL_MINUTES="${BACKUP_INTERVAL_MINUTES:-1440}"
 LOG_DIR="${LOG_DIR:-/logs}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/google-contacts-backup.log}"
 
@@ -9,7 +8,7 @@ mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-echo "Starting Google Contacts incremental backup (interval: ${BACKUP_INTERVAL_MINUTES}m)..."
+echo "Starting Google Contacts incremental backup..."
 
 # Force direct DNS if Docker's internal resolver (127.0.0.11) is broken
 if ! python3 -c "import socket; socket.setdefaulttimeout(3); socket.getaddrinfo('google.com', 443)" >/dev/null 2>&1; then
@@ -17,9 +16,4 @@ if ! python3 -c "import socket; socket.setdefaulttimeout(3); socket.getaddrinfo(
     printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
 fi
 
-INTERVAL_SECONDS=$((BACKUP_INTERVAL_MINUTES * 60))
-
-echo "Running initial backup..."
-python3 /app/backup.py || echo "Initial backup failed, will retry in watch mode."
-
-exec python3 /app/backup.py --watch --interval "$INTERVAL_SECONDS"
+exec python3 /app/backup.py --watch

@@ -170,6 +170,69 @@ class SpotifyBackupTests(unittest.TestCase):
         self.assertEqual(playlists[1]["tracks_count"], 99)
         self.assertEqual(playlists[1]["tracks_error"], "http status: 403")
 
+    def test_access_limits_are_recorded_without_losing_other_backup_data(self):
+        module = load_backup_module(self)
+        module.BACKUP_DIR = str(self.backup_dir)
+        module.CLIENT_ID = "client"
+        module.CLIENT_SECRET = "secret"
+        module.CACHE_PATH = str(self.base / ".cache")
+        Path(module.CACHE_PATH).write_text("{}", encoding="utf-8")
+        with patch.object(module, "get_spotify_client", return_value=object()), \
+             patch.object(module, "backup_profile", return_value={"display_name": "Tester"}), \
+             patch.object(module, "backup_playlists", return_value=[{"tracks_error": "403"}]), \
+             patch.object(module, "backup_liked_tracks", return_value=[]), \
+             patch.object(module, "backup_saved_albums", return_value=[]), \
+             patch.object(module, "backup_followed_artists", return_value=[]):
+            self.assertEqual(module.main(), 0)
+
+        current = json.loads((self.backup_dir / module.CURRENT_BACKUP_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(current["playlist_items_unavailable"], 1)
+        self.assertEqual(current["playlists"][0]["tracks_error"], "403")
+        self.assertEqual(current["liked_tracks"], [])
+
+    def test_playlist_with_cached_error_is_retried(self):
+        module = load_backup_module(self)
+        module.BACKUP_DIR = str(self.backup_dir)
+        (self.backup_dir / module.PLAYLIST_CACHE_NAME).write_text(json.dumps({
+            "playlist": {"snapshot_id": "same", "tracks": [], "tracks_error": "403"}
+        }), encoding="utf-8")
+
+        class FakeSpotify:
+            calls = 0
+
+            def current_user_playlists(self):
+                return {"items": [{"id": "playlist", "name": "Playlist", "description": "",
+                          "owner": {"id": "owner"}, "collaborative": False, "public": True,
+                          "snapshot_id": "same", "tracks": {"total": 0}}], "next": None}
+
+            def playlist_items(self, playlist_id, limit=100):
+                self.calls += 1
+                return {"items": [], "next": None}
+
+        spotify = FakeSpotify()
+        result = module.backup_playlists(spotify)
+        self.assertEqual(spotify.calls, 1)
+        self.assertNotIn("tracks_error", result[0])
+
+    def test_followed_playlist_items_are_not_requested_when_api_disallows_them(self):
+        module = load_backup_module(self)
+        module.BACKUP_DIR = str(self.backup_dir)
+
+        class FakeSpotify:
+            def current_user_playlists(self):
+                return {"items": [{"id": "followed", "name": "Followed", "description": "",
+                          "owner": {"id": "another-user"}, "collaborative": False,
+                          "public": True, "snapshot_id": "same", "tracks": {"total": 10}}],
+                        "next": None}
+
+            def playlist_items(self, *args, **kwargs):
+                raise AssertionError("Spotify forbids item access for this playlist")
+
+        result = module.backup_playlists(FakeSpotify(), user_id="my-user")
+        self.assertEqual(result[0]["tracks_count"], 10)
+        self.assertEqual(result[0]["tracks"], [])
+        self.assertIn("Spotify API limits", result[0]["tracks_error"])
+
     def test_backup_playlists_skips_items_without_track_but_keeps_other_tracks(self):
         module = load_backup_module(self)
         module.BACKUP_DIR = str(self.backup_dir)

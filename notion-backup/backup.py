@@ -15,7 +15,7 @@ from pathlib import Path
 import requests
 
 # ── Config ─────────────────────────────────────────────────────────────────
-for _p in ["/shared", str(Path(__file__).resolve().parent.parent / "shared")]:
+for _p in ["/app/project-settings", str(Path(__file__).resolve().parent.parent / "settings")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 from config_loader import cfg, require_env, env  # noqa: E402

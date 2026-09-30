@@ -23,8 +23,7 @@ item_types = ["VEVENT"]
 [storage google_calendars]
 type = "google_calendar"
 token_file = "$GOOGLE_TOKEN_FILE"
-# client_id and client_secret are required to initiate the OAuth flow
-# (vdirsyncer authorize) and are embedded in the token file afterwards.
+# The Desktop client JSON mounted from setup/google supplies these values.
 client_id = "$GOOGLE_CLIENT_ID"
 client_secret = "$GOOGLE_CLIENT_SECRET"
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-for _p in ["/shared", str(Path(__file__).resolve().parent.parent / "shared")]:
+for _p in ["/app/project-settings", str(Path(__file__).resolve().parent.parent / "settings")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 from config_loader import cfg, env  # noqa: E402

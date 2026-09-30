@@ -2,31 +2,35 @@
 # sync-notify.sh — wraps `python3 /app/sync_wrapper.py sync`, then sends a Telegram summary.
 #
 # Behaviour:
-#   • On errors  : always notify with the full error lines + debug tracebacks.
-#   • On success : notify once every NOTIFY_OK_EVERY_HOURS (default 24h) so
-#                  you get a daily heartbeat without spam.
+#   • On errors  : notify with the captured error lines.
+#   • On success : notify when events changed.
 #
 # Required env (optional — notifications are silently skipped if absent):
 #   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-#
-# Optional env:
-#   NOTIFY_OK_EVERY_HOURS   heartbeat interval in hours (default: 24, 0 = never)
-#   HEARTBEAT_FILE          path to the last-ok timestamp (default: /tmp/last_ok_notify)
 
 set -e
 
-HEARTBEAT_FILE="${HEARTBEAT_FILE:-/tmp/last_ok_notify}"
-NOTIFY_OK_EVERY_HOURS="${NOTIFY_OK_EVERY_HOURS:-24}"
+LOCK_DIR="/tmp/vdirsyncer-sync.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "error: another vdirsyncer sync is already running" >&2
+  exit 1
+fi
+trap 'rmdir "$LOCK_DIR"' EXIT
+rm -f /tmp/vdirsyncer_changed_names.txt /tmp/vdirsyncer_skipped_names.txt
+
 OUTPUT_FILE="/tmp/vdirsyncer_output"
 
 # ── Run sync, capture all output ──────────────────────────────────────────────
 # We always run with -v (verbose) so the output contains "Copying …" lines.
-# If errors are found we re-run with -vdebug to get tracebacks (see below).
+# Failed pairing blocks the sync, including diagnostics.
 set +e
 PAIRING_OK=1
+RETRIED_SESSION_ERROR=0
 # Recheck the pairing before every sync. A failed or ambiguous pairing blocks
 # all writes and is handled by the normal error notification below.
-if /app/discover-match.sh > "$OUTPUT_FILE" 2>&1; then
+if python3 /app/refresh_pairing.py --write > "$OUTPUT_FILE" 2>&1 \
+    && python3 /app/render_config.py >> "$OUTPUT_FILE" 2>&1 \
+    && yes '' | vdirsyncer discover caldav_gcal >> "$OUTPUT_FILE" 2>&1; then
     python3 /app/sync_wrapper.py sync >> "$OUTPUT_FILE" 2>&1
     EXIT_CODE=$?
 else
@@ -43,22 +47,25 @@ if [ "$PAIRING_OK" -eq 1 ] && [ "$EXIT_CODE" -ne 0 ] && grep -q "Session is clos
     FAILED_FILE="/tmp/vdirsyncer_failed_collections"
     # Extract failing collection names, e.g. "caldav_gcal/Cura personale"
     # Use a file + while-read to preserve spaces in collection names
-    grep "Session is closed" "$OUTPUT_FILE" \
-        | sed 's/error: Unknown error occurred for \(caldav_gcal\/[^:]*\):.*/\1/' \
+    sed -n 's/^error: Unknown error occurred for \(caldav_gcal\/[^:]*\):.*Session is closed.*/\1/p' "$OUTPUT_FILE" \
         | sort -u > "$FAILED_FILE"
-    RETRY_EXIT=0
-    while IFS= read -r COLLECTION; do
-        echo "[sync-notify] Retrying $COLLECTION individually..."
-        python3 /app/sync_wrapper.py sync "$COLLECTION" > "$RETRY_FILE" 2>&1
-        COLL_EXIT=$?
-        cat "$RETRY_FILE" >> "$OUTPUT_FILE"
-        [ "$COLL_EXIT" -ne 0 ] && RETRY_EXIT=$COLL_EXIT
-    done < "$FAILED_FILE"
-    # Recalculate exit: 0 only if both the main run's other errors AND retries passed
-    if [ "$RETRY_EXIT" -eq 0 ]; then
-        # Check if there were non-session-closed errors in the main run
-        OTHER_ERRORS=$(grep "^error:" "$OUTPUT_FILE" | grep -v "Session is closed" || true)
-        [ -z "$OTHER_ERRORS" ] && EXIT_CODE=0
+    if [ -s "$FAILED_FILE" ]; then
+        RETRY_EXIT=0
+        while IFS= read -r COLLECTION; do
+            echo "[sync-notify] Retrying $COLLECTION individually..."
+            python3 /app/sync_wrapper.py sync "$COLLECTION" > "$RETRY_FILE" 2>&1
+            COLL_EXIT=$?
+            cat "$RETRY_FILE" >> "$OUTPUT_FILE"
+            [ "$COLL_EXIT" -ne 0 ] && RETRY_EXIT=$COLL_EXIT
+        done < "$FAILED_FILE"
+        # Only a successful retry with no other errors can recover the run.
+        if [ "$RETRY_EXIT" -eq 0 ]; then
+            OTHER_ERRORS=$(grep "^error:" "$OUTPUT_FILE" | grep -v "Session is closed" || true)
+            if [ -z "$OTHER_ERRORS" ]; then
+                EXIT_CODE=0
+                RETRIED_SESSION_ERROR=1
+            fi
+        fi
     fi
 fi
 set -e
@@ -68,6 +75,9 @@ echo "$OUTPUT"   # still echo to Docker logs
 
 # ── Parse output ──────────────────────────────────────────────────────────────
 ERROR_LINES=$(printf '%s\n' "$OUTPUT" | grep "^error:" || true)
+if [ "$RETRIED_SESSION_ERROR" -eq 1 ]; then
+  ERROR_LINES=$(printf '%s\n' "$ERROR_LINES" | grep -v "Session is closed" || true)
+fi
 WARN_LINES=$(printf '%s\n'  "$OUTPUT" | grep "^warning:" || true)
 COPY_COUNT=$(printf '%s\n'  "$OUTPUT" | grep -c "^Copying" || true)
 SYNC_LINES=$(printf '%s\n'  "$OUTPUT" | grep "^Syncing" || true)
@@ -93,15 +103,6 @@ telegram_send() {
 
 # ── Notify on error ───────────────────────────────────────────────────────────
 if [ -n "$ERROR_LINES" ] || [ "$EXIT_CODE" -ne 0 ]; then
-  # For connection/auth errors, re-run with -vdebug to grab tracebacks
-  DEBUG_SECTION=""
-  if [ "$HAS_DNS" -gt 0 ] || [ "$HAS_AUTH" -gt 0 ]; then
-    set +e
-    DEBUG_OUT=$(vdirsyncer --verbosity=DEBUG sync 2>&1 | grep -A6 "^error:\|ClientConnector\|Forbidden\|resolution" | head -60)
-    set -e
-    DEBUG_SECTION=$(printf '\n\n*Debug trace:*\n```\n%s\n```' "$DEBUG_OUT")
-  fi
-
   # Compose diagnostic hints
   HINTS=""
   if [ "$HAS_DNS" -gt 0 ]; then
@@ -118,13 +119,19 @@ if [ -n "$ERROR_LINES" ] || [ "$EXIT_CODE" -ne 0 ]; then
 *Errors:*
 \`\`\`
 $(printf '%s\n' "$ERROR_LINES" | head -20)
-\`\`\`${HINTS}${DEBUG_SECTION}
+\`\`\`${HINTS}
 
 _Exit code: ${EXIT_CODE} | Items copied this run: ${COPY_COUNT}_"
 
   telegram_send "$MSG"
+  [ "$EXIT_CODE" -ne 0 ] || EXIT_CODE=1
   exit "$EXIT_CODE"
 fi
+
+# Record a completed sync even when there were no event changes.
+mkdir -p /data/status
+date -u +%s > /data/status/.last-success.tmp
+mv /data/status/.last-success.tmp /data/status/last-success
 
 # ── Notify on success (only if things changed) ─────────────────────────────
 if [ "$COPY_COUNT" -gt 0 ] || [ -s "/tmp/vdirsyncer_changed_names.txt" ]; then

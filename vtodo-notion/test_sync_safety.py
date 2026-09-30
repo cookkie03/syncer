@@ -46,7 +46,7 @@ os.environ["VTODO_NOTION_STATE_FILE"] = os.path.join(_test_tmpdir, "sync_state.j
 # Aggiungi il parent al path per config_loader
 _here = Path(__file__).resolve().parent
 _root = _here.parent
-for _p in [str(_root / "shared"), str(_root)]:
+for _p in [str(_root / "settings"), str(_root)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

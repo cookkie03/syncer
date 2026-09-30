@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install supercronic
 ARG SUPERCRONIC_VERSION=0.2.29
 ARG TARGETARCH
-RUN case "${TARGETARCH}" in \
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
       amd64) ARCH="amd64" ;; \
       arm64) ARCH="arm64" ;; \
       *) echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
@@ -17,17 +17,13 @@ RUN case "${TARGETARCH}" in \
     chmod +x /usr/local/bin/supercronic
 
 RUN pip install --no-cache-dir \
-    caldav \
     vobject \
     requests \
-    python-dateutil \
     google-api-python-client \
     google-auth-httplib2 \
-    google-auth-oauthlib \
     pyyaml
 
 WORKDIR /app
-COPY sync.py /app/sync.py
 COPY backup.py /app/backup.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

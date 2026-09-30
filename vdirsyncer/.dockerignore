@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!config.template
+!entrypoint.sh
+!sync-notify.sh
+!sync_wrapper.py
+!sync_filters.py
+!render_config.py
+!refresh_pairing.py

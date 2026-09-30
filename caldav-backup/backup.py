@@ -3,12 +3,11 @@
 caldav-backup — backup completo del server CalDAV in formato ICS
 
 Esporta tutti i calendari (VEVENT) e le liste task (VTODO) dal server CalDAV
-in file ICS separati. Supporta backup incrementale basato su hardlink.
+in file ICS separati, con snapshot periodici e promozione dell'ultimo backup.
 
 Usage:
     python backup.py                    # backup singolo
-    python backup.py --watch            # watchdog mode (backup automatico su modifiche)
-    python backup.py --discover         # solo discover e lista calendari
+    python backup.py --watch            # backup periodico
 """
 
 import argparse
@@ -45,28 +44,6 @@ def require_env(name: str) -> str:
     return value
 
 
-def load_env_from_file(env_path: str = ".env") -> None:
-    """Load environment variables from .env file if running locally."""
-    env_file = Path(env_path)
-    if env_file.exists():
-        with open(env_file, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, value = line.split("=", 1)
-                    key = key.strip()
-                    value = value.strip()
-                    # Remove quotes if present
-                    if value and value[0] in ('"', "'") and value[-1] == value[0]:
-                        value = value[1:-1]
-                    if key and value and key not in os.environ:
-                        os.environ[key] = value
-        log.info("Loaded environment from %s", env_path)
-
-
-# Load .env file if running locally (not in container)
-load_env_from_file()
-
 # CalDAV credentials from environment variables
 CALDAV_URL = require_env("CALDAV_URL")
 CALDAV_USERNAME = require_env("CALDAV_USERNAME")
@@ -76,15 +53,6 @@ CALDAV_PASSWORD = require_env("CALDAV_PASSWORD")
 # Optional: backup directory (default: ./caldav-backup-output)
 BACKUP_DIR = Path(os.environ.get("CALDAV_BACKUP_DIR", "./caldav-backup-output"))
 SNAPSHOT_RETENTION = max(1, int(os.environ.get("CALDAV_BACKUP_RETENTION", "14")))
-DISCOVER_INTERVAL_HOURS = max(1, int(os.environ.get("CALDAV_DISCOVER_INTERVAL_HOURS", "24")))
-
-# ── Configurazione Calendari ─────────────────────────────────────────────
-# NOTA: Usa --discover per trovare tutti i calendari disponibili, poi inserisci i nomi qui.
-# Lascia vuoto per backuppare TUTTI i calendari trovati.
-CALENDARS = []  # es: ["personale", "lavoro", "famiglia"] - lasciare vuoto per tutti
-
-# Calendari VTODO (task) - lascia vuoto per tutti
-VTODO_LISTS = []  # es: ["tasks_default", "promemoria"] - lasciare vuoto per tutti
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -127,44 +95,46 @@ def discover_all_calendars(client: caldav.DAVClient) -> tuple[list[dict], list[d
             # Try both - will be added to both lists if contains both
             todo_type = None
 
+        todo_error = event_error = None
         try:
-            # Check for todos
             todos = cal.todos(include_completed=True)
             if todos or todo_type:
                 todo_lists.append({
                     "name": display_name,
                     "url": cal_url,
-                    "cal": cal,
-                    "count": len(todos) if todos else 0,
+                    "items": todos,
+                    "count": len(todos),
                 })
-                log.info("[Discover] VTODO: '%s' (%d items)", display_name, len(todos) if todos else 0)
+                log.info("[Discover] VTODO: '%s' (%d items)", display_name, len(todos))
         except Exception as exc:
+            todo_error = exc
             log.debug("[Discover] No todos in %s: %s", display_name, exc)
 
         try:
-            # Check for events
             events = cal.events()
             if events or todo_type is False:
                 calendars.append({
                     "name": display_name,
                     "url": cal_url,
-                    "cal": cal,
-                    "count": len(events) if events else 0,
+                    "items": events,
+                    "count": len(events),
                 })
-                log.info("[Discover] Calendar: '%s' (%d events)", display_name, len(events) if events else 0)
+                log.info("[Discover] Calendar: '%s' (%d events)", display_name, len(events))
         except Exception as exc:
+            event_error = exc
             log.debug("[Discover] No events in %s: %s", display_name, exc)
+
+        if (todo_type is True and todo_error) or (todo_type is False and event_error) or (todo_error and event_error):
+            raise RuntimeError(f"Could not read collection {display_name}") from (todo_error or event_error)
 
     return calendars, todo_lists
 
 
-def export_calendar(cal: Any, name: str, backup_path: Path, include_completed: bool = True) -> int:
+def export_calendar(events: list, name: str, backup_path: Path) -> int:
     """Export a calendar (VEVENT) to ICS file."""
     ics_path = backup_path / f"calendar_{sanitize_filename(name)}.ics"
 
     try:
-        events = cal.events()
-        # Build ICS content
         ics_content = build_ics_from_vevents(events)
 
         ics_path.write_text(ics_content, encoding="utf-8")
@@ -176,13 +146,11 @@ def export_calendar(cal: Any, name: str, backup_path: Path, include_completed: b
         raise
 
 
-def export_todo_list(cal: Any, name: str, backup_path: Path, include_completed: bool = True) -> int:
+def export_todo_list(todos: list, name: str, backup_path: Path) -> int:
     """Export a VTODO list to ICS file."""
     ics_path = backup_path / f"tasks_{sanitize_filename(name)}.ics"
 
     try:
-        todos = cal.todos(include_completed=include_completed)
-        # Build ICS content
         ics_content = build_ics_from_vtodos(todos)
 
         ics_path.write_text(ics_content, encoding="utf-8")
@@ -225,6 +193,14 @@ def promote_snapshot(staging: Path, backup_root: Path, metadata: dict[str, Any])
     if not files:
         raise RuntimeError("Backup produced no ICS files")
 
+    latest = backup_root / "latest"
+    if latest.is_dir():
+        previous_files = {path.name for path in latest.glob("*.ics")}
+        current_files = {path.name for path in files}
+        missing = previous_files - current_files
+        if missing:
+            raise RuntimeError("Backup is missing previous collections: " + ", ".join(sorted(missing)))
+
     checksums = {
         str(path.relative_to(staging)): sha256_file(path)
         for path in files
@@ -250,7 +226,6 @@ def promote_snapshot(staging: Path, backup_root: Path, metadata: dict[str, Any])
         suffix += 1
     os.replace(staging, snapshot)
 
-    latest = backup_root / "latest"
     latest_staging = backup_root / ".latest-staging"
     previous = backup_root / ".latest-previous"
     try:
@@ -276,58 +251,31 @@ def promote_snapshot(staging: Path, backup_root: Path, metadata: dict[str, Any])
     return latest
 
 
+def build_ics(items: list, component: str) -> str:
+    """Keep every item component and its timezone definitions in one calendar."""
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//caldav-backup//EN"]
+    if component == "VEVENT":
+        lines.append("CALSCALE:GREGORIAN")
+    timezones: list[str] = []
+    entries: list[str] = []
+    for item in items:
+        data = item.data
+        found = re.findall(f"BEGIN:{component}.*?END:{component}", data, flags=re.DOTALL)
+        if not found:
+            raise RuntimeError(f"CalDAV returned an item without a complete {component} component")
+        entries.extend(found)
+        for timezone_block in re.findall(r"BEGIN:VTIMEZONE.*?END:VTIMEZONE", data, flags=re.DOTALL):
+            if timezone_block not in timezones:
+                timezones.append(timezone_block)
+    return "\n".join([*lines, *timezones, *entries, "END:VCALENDAR", ""])
+
+
 def build_ics_from_vevents(events: list) -> str:
-    """Build ICS content from CalDAV VEVENT objects."""
-    lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//caldav-backup//EN",
-        "CALSCALE:GREGORIAN",
-    ]
-
-    for event in events:
-        try:
-            # Get the raw iCal data
-            if hasattr(event, "data") and event.data:
-                ics_data = event.data
-                # Extract just the VEVENT component
-                if "BEGIN:VEVENT" in ics_data:
-                    # Find the VEVENT block
-                    start = ics_data.find("BEGIN:VEVENT")
-                    end = ics_data.find("END:VEVENT") + len("END:VEVENT")
-                    if start >= 0 and end > start:
-                        vevent = ics_data[start:end]
-                        lines.append(vevent)
-        except Exception as exc:
-            log.warning("[ICS] Error processing event: %s", exc)
-
-    lines.append("END:VCALENDAR")
-    return "\n".join(lines) + "\n"
+    return build_ics(events, "VEVENT")
 
 
 def build_ics_from_vtodos(todos: list) -> str:
-    """Build ICS content from CalDAV VTODO objects."""
-    lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//caldav-backup//EN",
-    ]
-
-    for todo in todos:
-        try:
-            if hasattr(todo, "data") and todo.data:
-                ics_data = todo.data
-                if "BEGIN:VTODO" in ics_data:
-                    start = ics_data.find("BEGIN:VTODO")
-                    end = ics_data.find("END:VTODO") + len("END:VTODO")
-                    if start >= 0 and end > start:
-                        vtodo = ics_data[start:end]
-                        lines.append(vtodo)
-        except Exception as exc:
-            log.warning("[ICS] Error processing todo: %s", exc)
-
-    lines.append("END:VCALENDAR")
-    return "\n".join(lines) + "\n"
+    return build_ics(todos, "VTODO")
 
 
 def run_backup() -> dict:
@@ -352,22 +300,12 @@ def run_backup() -> dict:
     stats = {"calendars": 0, "events": 0, "todo_lists": 0, "todos": 0}
     failures = []
 
-    # Filter calendars if specific ones are configured
-    if CALENDARS:
-        calendars = [c for c in calendars if c["name"] in CALENDARS]
-        log.info("Filtered to configured calendars: %s", CALENDARS)
-
-    # Filter todo lists if specific ones are configured
-    if VTODO_LISTS:
-        todo_lists = [t for t in todo_lists if t["name"] in VTODO_LISTS]
-        log.info("Filtered to configured task lists: %s", VTODO_LISTS)
-
     # Export calendars (VEVENT)
     log.info("-" * 40)
     log.info("Exporting calendars (VEVENT)...")
     for cal_info in calendars:
         try:
-            count = export_calendar(cal_info["cal"], cal_info["name"], staging)
+            count = export_calendar(cal_info["items"], cal_info["name"], staging)
             stats["calendars"] += 1
             stats["events"] += count
         except Exception as exc:
@@ -379,7 +317,7 @@ def run_backup() -> dict:
     log.info("Exporting task lists (VTODO)...")
     for todo_info in todo_lists:
         try:
-            count = export_todo_list(todo_info["cal"], todo_info["name"], staging)
+            count = export_todo_list(todo_info["items"], todo_info["name"], staging)
             stats["todo_lists"] += 1
             stats["todos"] += count
         except Exception as exc:
@@ -401,7 +339,11 @@ def run_backup() -> dict:
         ],
         "stats": stats,
     }
-    latest = promote_snapshot(staging, BACKUP_DIR, metadata)
+    try:
+        latest = promote_snapshot(staging, BACKUP_DIR, metadata)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
 
     log.info("=" * 60)
     log.info("Backup complete!")
@@ -413,43 +355,8 @@ def run_backup() -> dict:
     return stats
 
 
-def run_discover() -> None:
-    """Just discover and list all available calendars."""
-    log.info("=" * 60)
-    log.info("CalDAV Calendar Discovery")
-    log.info("=" * 60)
-
-    client = connect_caldav()
-    calendars, todo_lists = discover_all_calendars(client)
-
-    log.info("=" * 60)
-    log.info("DISCOVERED CALENDARS (VEVENT):")
-    log.info("=" * 60)
-    for cal in calendars:
-        log.info("  - %s (%d events)", cal["name"], cal["count"])
-        log.info("    URL: %s", cal["url"])
-
-    log.info("=" * 60)
-    log.info("DISCOVERED TASK LISTS (VTODO):")
-    log.info("=" * 60)
-    for todo in todo_lists:
-        log.info("  - %s (%d items)", todo["name"], todo["count"])
-        log.info("    URL: %s", todo["url"])
-
-    log.info("=" * 60)
-    log.info("To backup specific calendars, edit this script and set:")
-    log.info("  CALENDARS = [%s]", ", ".join(f'"{c["name"]}"' for c in calendars))
-    log.info("  VTODO_LISTS = [%s]", ", ".join(f'"{t["name"]}"' for t in todo_lists))
-    log.info("=" * 60)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="CalDAV backup tool")
-    parser.add_argument(
-        "--discover", "-d",
-        action="store_true",
-        help="Discover and list all available calendars (no backup)",
-    )
     parser.add_argument(
         "--watch", "-w",
         action="store_true",
@@ -461,27 +368,13 @@ def main() -> None:
         default=60,
         help="Interval in seconds for watch mode (default: 60)",
     )
-    parser.add_argument(
-        "--discover-interval-hours",
-        type=int,
-        default=DISCOVER_INTERVAL_HOURS,
-        help="Run an additional discovery log pass at this interval (default: 24)",
-    )
     args = parser.parse_args()
 
-    if args.discover:
-        run_discover()
-    elif args.watch:
+    if args.watch:
         log.info("Starting watch mode (backup every %d seconds, Ctrl+C to stop)", args.interval)
-        last_discovery = 0.0
         try:
             while True:
                 try:
-                    now = time.monotonic()
-                    if now - last_discovery >= args.discover_interval_hours * 3600:
-                        log.info("Running scheduled daily discovery")
-                        run_discover()
-                        last_discovery = now
                     run_backup()
                 except Exception as exc:
                     log.error("Backup failed: %s", exc)

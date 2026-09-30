@@ -1,9 +1,10 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # syncer — Configurazione globale
 #
-# Tutti i parametri operativi dei servizi in un unico file.
+# Parametri letti da config_loader (Notion disattivato e Google Contacts).
+# Gli intervalli degli altri servizi attivi sono definiti in Compose/.env.
 # Ogni valore può essere sovrascritto via variabile d'ambiente:
-#   la env var ha priorità → poi config.yaml → poi default nel codice.
+#   la env var ha priorità → poi service-options.yaml → poi default nel codice.
 #
 # I segreti (token, password) restano nel .env — qui solo parametri operativi.
 # ═══════════════════════════════════════════════════════════════════════════
@@ -12,24 +13,19 @@
 # ── Parametri condivisi ───────────────────────────────────────────────────
 
 shared:
-  caldav_timeout_seconds: 15
-  dns:
-    - "192.168.1.1"        # Router locale
-    - "8.8.8.8"            # Google DNS fallback
-  telegram_timeout: 10     # Timeout richieste Telegram (secondi)
-  notify_ok_every_hours: 24  # Heartbeat Telegram (ore, 0 = disabilita)
+  telegram_timeout: 10
 
 
 # ── vtodo-notion: CalDAV VTODO ↔ Notion ───────────────────────────────────
 
 vtodo_notion:
-  # Scheduling
-  sync_interval_minutes: 10
-
   # Resilienza
   max_retries: 3                  # Tentativi connessione CalDAV
   circuit_breaker_threshold: 5    # Errori consecutivi prima di abortire il ciclo
   retry_backoff_factor: 5         # Backoff: secondi × numero tentativo
+  max_deletions_per_cycle: 10     # Limite di sicurezza per ciclo
+  max_deletions_pct: 0.10         # Massimo 10% degli UID noti per ciclo
+  snapshot_min_ratio: 0.60       # Blocca snapshot sotto il 60% degli UID noti
 
   # Timeout (secondi)
   caldav_timeout: 60
@@ -56,46 +52,16 @@ vtodo_notion:
   log_dir: "/data/logs"
 
 
-# ── vdirsyncer: CalDAV → Google Calendar ──────────────────────────────────
-
-vdirsyncer:
-  sync_interval_minutes: 60
-  conflict_resolution: "b wins"   # "a wins" (CalDAV) / "b wins" (Google)
-  discover_match_schedule: "0 2 * * *"  # Discover and match collections daily
-
-
 # ── notion-backup: Backup Notion via API ufficiale ────────────────────────
 
 notion_backup:
-  backup_schedule: "0 2 * * *"    # Cron syntax (default: ogni giorno alle 02:00 UTC) per backup API
-  export_schedule: "0 3 * * *"    # Cron syntax (default: ogni giorno alle 03:00 UTC) per scaricare export da Gmail
   rate_limit_rps: 3               # Richieste al secondo verso Notion API
   notion_api_version: "2022-06-28"
   backup_dir: "/backup"           # Percorso nel container
-  max_zip_exports: 7              # Numero massimo di backup ZIP da conservare
-
-
-# ── caldav-backup: Backup CalDAV → file ICS ───────────────────────────────
-
-caldav_backup:
-  watch_interval_seconds: 14400   # Intervallo polling (14400 = 4 ore)
-  discover_interval_hours: 24     # Inventario CalDAV aggiuntivo giornaliero
-  snapshot_retention: 14          # Snapshot completi conservati
-  backup_dir: "/backup"           # Percorso nel container
-
-
-# ── spotify-backup: Spotify → JSON persistente ────────────────────────────
-
-spotify_backup:
-  backup_interval_minutes: 240
-  snapshot_retention: 14
-  backup_dir: "/data/backup"
-  snapshot_dir: "/data/backup/snapshots"
 
 
 # ── google-contacts-backup: Google Contacts → local incremental backup ────
 
 google_contacts_backup:
   backup_interval_minutes: 1440   # 24 ore
-  backup_dir: "/backup"           # Snapshot incrementali dei contatti Google
   google_api_delay: 0.5           # Secondi di pausa tra chiamate Google API

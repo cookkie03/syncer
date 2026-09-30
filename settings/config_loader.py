@@ -1,7 +1,7 @@
 """
-Loader centralizzato per config.yaml.
+Loader centralizzato per settings/service-options.yaml.
 
-Ordine di priorità: variabile d'ambiente > config.yaml > default nel codice.
+Ordine di priorità: variabile d'ambiente > service-options.yaml > default nel codice.
 
 Uso:
     from config_loader import cfg
@@ -13,7 +13,7 @@ Uso:
     tg_timeout = cfg("shared.telegram_timeout", 10, int)
 
     # Parametro obbligatorio (nessun default)
-    token = cfg.require_env("NOTION_TOKEN")
+    token = require_env("NOTION_TOKEN")
 """
 
 import os
@@ -27,12 +27,12 @@ try:
 except ImportError:
     yaml = None  # type: ignore
 
-# ── Trova il config.yaml ──────────────────────────────────────────────────
+# ── Trova il file delle opzioni ────────────────────────────────────────────
 
 _CONFIG_PATHS = [
-    Path(os.environ.get("SYNCER_CONFIG", "")),               # override esplicito
-    Path("/app/config.yaml"),                                 # nel container (montato)
-    Path(__file__).resolve().parent.parent / "config.yaml",   # repo root (sviluppo locale)
+    *([Path(os.environ["SYNCER_CONFIG"])] if os.environ.get("SYNCER_CONFIG") else []),
+    Path("/app/project-settings/service-options.yaml"),
+    Path(__file__).with_name("service-options.yaml"),
 ]
 
 _data: dict = {}
@@ -48,7 +48,7 @@ for p in _CONFIG_PATHS:
 
 
 def _resolve(dotpath: str) -> Any:
-    """Naviga config.yaml con notazione a punti: 'vtodo_notion.caldav_timeout'."""
+    """Naviga le opzioni con notazione a punti: 'vtodo_notion.caldav_timeout'."""
     node = _data
     for key in dotpath.split("."):
         if not isinstance(node, dict):
@@ -68,7 +68,7 @@ def _env_name(dotpath: str) -> str:
 
 def cfg(dotpath: str, default: Any = None, cast: type = str) -> Any:
     """
-    Legge un parametro con priorità: env var > config.yaml > default.
+    Legge un parametro con priorità: env var > service-options.yaml > default.
 
     Args:
         dotpath: percorso nel YAML con punti (es. "vtodo_notion.caldav_timeout")
@@ -86,7 +86,7 @@ def cfg(dotpath: str, default: Any = None, cast: type = str) -> Any:
         except (ValueError, TypeError):
             return default
 
-    # 2. config.yaml
+    # 2. service-options.yaml
     yaml_val = _resolve(dotpath)
     if yaml_val is not None:
         try:
