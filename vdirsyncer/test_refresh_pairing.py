@@ -1,5 +1,6 @@
 """The pairing check must block writes when collection IDs cannot be trusted."""
 
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -8,12 +9,21 @@ from refresh_pairing import parse_discover_output, refresh_map, run_discover
 
 class PairingSafetyTests(unittest.TestCase):
     def test_discover_does_not_confirm_collection_creation(self):
-        output = 'caldav_calendars:\ngoogle_calendars:\n'
+        output = 'Discovering collections for pair caldav_gcal\ncaldav_calendars:\ngoogle_calendars:\n'
         with patch("refresh_pairing.subprocess.run") as run:
             run.return_value.returncode = 0
             run.return_value.stdout = output
             self.assertEqual(run_discover(), output)
             self.assertNotIn("y", run.call_args.kwargs["input"])
+            self.assertEqual(run.call_args.kwargs["stderr"], subprocess.STDOUT)
+
+    def test_discover_failure_still_blocks_pairing(self):
+        output = 'caldav_calendars:\ngoogle_calendars:\nerror: authentication failed\n'
+        with patch("refresh_pairing.subprocess.run") as run:
+            run.return_value.returncode = 1
+            run.return_value.stdout = output
+            with self.assertRaisesRegex(RuntimeError, "authentication failed"):
+                run_discover()
 
     def test_missing_counterpart_does_not_reuse_stale_id(self):
         previous = [{"name": "Shared", "caldav": "old-a", "google": "old-b"}]

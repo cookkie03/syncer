@@ -44,14 +44,15 @@ def run_discover() -> str:
     result = subprocess.run(
         ["vdirsyncer", "discover", "caldav_gcal"],
         check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
         input="\n" * 100,
     )
     output = result.stdout
     if result.returncode == 0 and "caldav_calendars:" in output and "google_calendars:" in output:
         return output
-    raise RuntimeError(output + ("\n" if output else "") + result.stderr)
+    raise RuntimeError(output)
 
 
 def refresh_map(entries: list[dict[str, str]], caldav: dict[str, str], google: dict[str, str]) -> list[dict[str, str]]:
