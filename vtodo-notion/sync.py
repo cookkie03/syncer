@@ -39,7 +39,7 @@ TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = env("TELEGRAM_CHAT_ID")
 
 STATE_FILE = Path(cfg("vtodo_notion.state_file", "/data/sync_state.json"))
-LOG_DIR    = Path(cfg("vtodo_notion.log_dir", "/data/logs"))
+LOG_DIR    = Path(cfg("vtodo_notion.log_dir", "/logs"))
 LOG_FILE   = LOG_DIR / "sync.log"
 
 MAX_RETRIES               = cfg("vtodo_notion.max_retries", 3, int)

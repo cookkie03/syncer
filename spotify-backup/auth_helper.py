@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'setup'))
 from project_env import load_project_env
 
 PROJECT_DIR = Path(__file__).resolve().parent
-DATA_DIR = PROJECT_DIR / 'data'
+STATE_DIR = PROJECT_DIR / 'state'
 
 
 def project_setting(name: str, default: str = '') -> str:
@@ -57,7 +57,7 @@ DEFAULT_REDIRECT_URI = 'http://127.0.0.1:9000/callback'
 
 def default_cache_path() -> Path:
     """Return the portable cache path stored inside the repo."""
-    return DATA_DIR / '.cache'
+    return STATE_DIR / '.cache'
 
 
 def resolved_cache_path() -> Path:

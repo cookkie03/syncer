@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import sys
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,9 @@ for shared_path in ["/app/project-settings", str(Path(__file__).resolve().parent
         sys.path.insert(0, shared_path)
 from config_loader import cfg  # noqa: E402
 from google_auth import load_google_client, token_matches_client  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from backup_storage import new_staging, publish_snapshot
 
 
 logging.basicConfig(
@@ -32,6 +36,7 @@ GOOGLE_CONTACTS_SCOPE = "https://www.googleapis.com/auth/contacts"
 GOOGLE_CONTACTS_READONLY_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"
 
 BACKUP_DIR = Path(cfg("google_contacts_backup.backup_dir", os.environ.get("BACKUP_DIR", "/backup")))
+SNAPSHOT_RETENTION = max(1, int(os.environ.get("GOOGLE_CONTACTS_SNAPSHOT_RETENTION", "14")))
 BACKUP_INTERVAL_MINUTES = cfg("google_contacts_backup.backup_interval_minutes", 1440, int)
 GOOGLE_API_DELAY = cfg("google_contacts_backup.google_api_delay", 0.5, float)
 
@@ -87,41 +92,12 @@ def atomic_write_json(path: Path, payload: dict) -> None:
     atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
 
 
-def update_latest_pointer(backup_root: Path, snapshot_name: str, snapshot_dir: Path) -> None:
-    latest_link = backup_root / "latest"
-    link_target = snapshot_dir.relative_to(backup_root)
-    if latest_link.is_dir() and not latest_link.is_symlink():
-        archive = backup_root / ("legacy-latest-" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f"))
-        latest_link.rename(archive)
-    elif latest_link.is_symlink() or latest_link.exists():
-        latest_link.unlink()
-    latest_link.symlink_to(link_target)
-
-    atomic_write_json(
-        backup_root / "latest.json",
-        {
-            "snapshot": snapshot_name,
-            "snapshot_dir": str(snapshot_dir),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
-
-
 def load_previous_manifest(backup_root: Path) -> tuple[str | None, dict]:
-    latest_json = backup_root / "latest.json"
-    if not latest_json.exists():
+    current = backup_root / "current"
+    manifest = current / "manifest.json"
+    if not manifest.exists():
         return None, {}
-
-    latest = json.loads(latest_json.read_text(encoding="utf-8"))
-    snapshot_name = latest.get("snapshot")
-    if not snapshot_name:
-        return None, {}
-
-    manifest_path = backup_root / "snapshots" / snapshot_name / "manifest.json"
-    if not manifest_path.exists():
-        return None, {}
-
-    return snapshot_name, json.loads(manifest_path.read_text(encoding="utf-8"))
+    return current.resolve().name, json.loads(manifest.read_text(encoding="utf-8"))
 
 
 def write_incremental_snapshot(backup_root: Path, contacts: dict[str, str], timestamp: str | None = None) -> dict:
@@ -134,67 +110,72 @@ def write_incremental_snapshot(backup_root: Path, contacts: dict[str, str], time
     snapshots_root = backup_root / "snapshots"
     snapshots_root.mkdir(parents=True, exist_ok=True)
 
-    snapshot_name = timestamp or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    snapshot_name = timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S%fZ")
     snapshot_dir = snapshots_root / snapshot_name
-    contacts_dir = snapshot_dir / "contacts"
-    contacts_dir.mkdir(parents=True, exist_ok=True)
+    staging = new_staging(backup_root)
+    try:
+        contacts_dir = staging / "contacts"
+        contacts_dir.mkdir(parents=True, exist_ok=True)
 
-    new_count = 0
-    changed_count = 0
-    unchanged_count = 0
-    manifest_contacts: dict[str, dict] = {}
+        new_count = 0
+        changed_count = 0
+        unchanged_count = 0
+        manifest_contacts: dict[str, dict] = {}
 
-    for uid in sorted(contacts):
-        vcard_text = normalize_vcard(contacts[uid])
-        digest = sha256_text(vcard_text)
-        filename = f"{sanitize_filename(uid)}.vcf"
-        destination = contacts_dir / filename
+        for uid in sorted(contacts):
+            vcard_text = normalize_vcard(contacts[uid])
+            digest = sha256_text(vcard_text)
+            filename = f"{sanitize_filename(uid)}.vcf"
+            destination = contacts_dir / filename
 
-        previous_entry = previous_contacts.get(uid)
-        if previous_entry and previous_entry.get("sha256") == digest and previous_snapshot:
-            previous_file = backup_root / "snapshots" / previous_snapshot / "contacts" / previous_entry["file"]
-            if previous_file.exists():
-                os.link(previous_file, destination)
-                unchanged_count += 1
+            previous_entry = previous_contacts.get(uid)
+            if previous_entry and previous_entry.get("sha256") == digest and previous_snapshot:
+                previous_file = backup_root / "current" / "contacts" / previous_entry["file"]
+                if previous_file.exists():
+                    os.link(previous_file, destination)
+                    unchanged_count += 1
+                else:
+                    atomic_write_text(destination, vcard_text)
+                    changed_count += 1
             else:
                 atomic_write_text(destination, vcard_text)
-                changed_count += 1
-        else:
-            atomic_write_text(destination, vcard_text)
-            if previous_entry:
-                changed_count += 1
-            else:
-                new_count += 1
+                if previous_entry:
+                    changed_count += 1
+                else:
+                    new_count += 1
 
-        manifest_contacts[uid] = {
-            "file": filename,
-            "sha256": digest,
+            manifest_contacts[uid] = {
+                "file": filename,
+                "sha256": digest,
+            }
+
+        previous_uids = set(previous_contacts)
+        current_uids = set(contacts)
+        deleted_uids = sorted(previous_uids - current_uids)
+
+        combined_vcf = "".join(normalize_vcard(contacts[uid]) for uid in sorted(contacts))
+        atomic_write_text(staging / "all_contacts.vcf", combined_vcf)
+
+        manifest = {
+            "timestamp": snapshot_name,
+            "snapshot_dir": str(snapshot_dir),
+            "previous_snapshot": previous_snapshot,
+            "contacts": manifest_contacts,
+            "deleted_uids": deleted_uids,
+            "stats": {
+                "total": len(contacts),
+                "new": new_count,
+                "changed": changed_count,
+                "unchanged": unchanged_count,
+                "deleted": len(deleted_uids),
+            },
         }
-
-    previous_uids = set(previous_contacts)
-    current_uids = set(contacts)
-    deleted_uids = sorted(previous_uids - current_uids)
-
-    combined_vcf = "".join(normalize_vcard(contacts[uid]) for uid in sorted(contacts))
-    atomic_write_text(snapshot_dir / "all_contacts.vcf", combined_vcf)
-
-    manifest = {
-        "timestamp": snapshot_name,
-        "snapshot_dir": str(snapshot_dir),
-        "previous_snapshot": previous_snapshot,
-        "contacts": manifest_contacts,
-        "deleted_uids": deleted_uids,
-        "stats": {
-            "total": len(contacts),
-            "new": new_count,
-            "changed": changed_count,
-            "unchanged": unchanged_count,
-            "deleted": len(deleted_uids),
-        },
-    }
-    atomic_write_json(snapshot_dir / "manifest.json", manifest)
-    update_latest_pointer(backup_root, snapshot_name, snapshot_dir)
-    return manifest
+        atomic_write_json(staging / "manifest.json", manifest)
+        publish_snapshot(staging, backup_root, SNAPSHOT_RETENTION, snapshot_name)
+        return manifest
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
 
 
 def google_to_vcard(person: dict, uid: str) -> str:

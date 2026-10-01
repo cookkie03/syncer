@@ -75,7 +75,19 @@ class IncrementalBackupTests(unittest.TestCase):
         self.assertEqual(current["stats"]["unchanged"], 1)
         self.assertEqual(current["stats"]["deleted"], 0)
 
-    def test_reports_deleted_contacts_and_updates_latest_pointer(self):
+    def test_retention_one_preserves_current_hardlinked_contacts(self):
+        module = load_backup_module(self)
+        module.SNAPSHOT_RETENTION = 1
+        contacts = {"uid": "BEGIN:VCARD\nFN:Alice\nEND:VCARD\n"}
+        module.write_incremental_snapshot(self.backup_dir, contacts, "20260930_120000")
+        previous = self.backup_dir / "current/contacts/uid.vcf"
+        inode = previous.stat().st_ino
+        module.write_incremental_snapshot(self.backup_dir, contacts, "2026-10-01T120000Z")
+        self.assertEqual(previous.read_text(), contacts["uid"])
+        self.assertEqual(previous.stat().st_ino, inode)
+        self.assertFalse((self.backup_dir / "snapshots/20260930_120000").exists())
+
+    def test_reports_deleted_contacts_and_updates_current_pointer(self):
         module = load_backup_module(self)
 
         module.write_incremental_snapshot(
@@ -100,14 +112,14 @@ class IncrementalBackupTests(unittest.TestCase):
         self.assertEqual(current["stats"]["deleted"], 1)
         self.assertEqual(current["stats"]["total"], 1)
 
-        latest_path = self.backup_dir / "latest.json"
+        latest_path = self.backup_dir / "current" / "manifest.json"
         self.assertTrue(latest_path.exists())
         latest = json.loads(latest_path.read_text(encoding="utf-8"))
-        self.assertEqual(latest["snapshot"], "20260717_130000")
+        self.assertEqual(latest["timestamp"], "20260717_130000")
 
-    def test_preserves_copied_latest_directory_before_creating_pointer(self):
+    def test_preserves_migrated_current_directory_before_creating_pointer(self):
         module = load_backup_module(self)
-        old_latest = self.backup_dir / "latest"
+        old_latest = self.backup_dir / "current"
         old_latest.mkdir()
         (old_latest / "existing-contact.vcf").write_text("old backup", encoding="utf-8")
 
@@ -119,7 +131,7 @@ class IncrementalBackupTests(unittest.TestCase):
 
         self.assertTrue(old_latest.is_symlink())
         self.assertTrue((old_latest / "contacts" / "uid-1.vcf").is_file())
-        archives = list(self.backup_dir.glob("legacy-latest-*"))
+        archives = list((self.backup_dir / "snapshots").glob("legacy-current-*"))
         self.assertEqual(len(archives), 1)
         self.assertEqual((archives[0] / "existing-contact.vcf").read_text(), "old backup")
 
@@ -151,8 +163,8 @@ class IncrementalBackupTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "zero contacts"):
             module.write_incremental_snapshot(self.backup_dir, {}, timestamp="20260717_130000")
-        latest = json.loads((self.backup_dir / "latest.json").read_text(encoding="utf-8"))
-        self.assertEqual(latest["snapshot"], "20260717_120000")
+        latest = json.loads((self.backup_dir / "current" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(latest["timestamp"], "20260717_120000")
 
 
 if __name__ == "__main__":

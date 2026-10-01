@@ -25,7 +25,7 @@ TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = env("TELEGRAM_CHAT_ID")
 
 BACKUP_DIR       = Path(cfg("notion_backup.backup_dir", "/backup"))
-JSON_DIR         = BACKUP_DIR / "json"
+JSON_DIR         = BACKUP_DIR / "current" / "json"
 
 NOTION_API_BASE  = "https://api.notion.com/v1"
 NOTION_VERSION   = cfg("notion_backup.notion_api_version", "2022-06-28")

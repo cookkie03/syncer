@@ -18,13 +18,15 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import caldav
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from backup_storage import new_staging, publish_snapshot
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -50,8 +52,8 @@ CALDAV_USERNAME = require_env("CALDAV_USERNAME")
 CALDAV_PASSWORD = require_env("CALDAV_PASSWORD")
 
 
-# Optional: backup directory (default: ./caldav-backup-output)
-BACKUP_DIR = Path(os.environ.get("CALDAV_BACKUP_DIR", "./caldav-backup-output"))
+# Container backup root; Compose mounts the service backup directory here.
+BACKUP_DIR = Path(os.environ.get("CALDAV_BACKUP_DIR", "/backup"))
 SNAPSHOT_RETENTION = max(1, int(os.environ.get("CALDAV_BACKUP_RETENTION", "14")))
 
 
@@ -177,25 +179,14 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def prune_snapshots(backup_root: Path, retention: int = SNAPSHOT_RETENTION) -> None:
-    snapshots_dir = backup_root / "snapshots"
-    snapshots = sorted(
-        (path for path in snapshots_dir.iterdir() if path.is_dir()),
-        key=lambda path: path.name,
-        reverse=True,
-    ) if snapshots_dir.exists() else []
-    for snapshot in snapshots[retention:]:
-        shutil.rmtree(snapshot)
-
-
 def promote_snapshot(staging: Path, backup_root: Path, metadata: dict[str, Any]) -> Path:
     files = sorted(path for path in staging.rglob("*.ics") if path.is_file())
     if not files:
         raise RuntimeError("Backup produced no ICS files")
 
-    latest = backup_root / "latest"
-    if latest.is_dir():
-        previous_files = {path.name for path in latest.glob("*.ics")}
+    current = backup_root / "current"
+    if current.is_dir():
+        previous_files = {path.name for path in current.glob("*.ics")}
         current_files = {path.name for path in files}
         missing = previous_files - current_files
         if missing:
@@ -217,38 +208,7 @@ def promote_snapshot(staging: Path, backup_root: Path, metadata: dict[str, Any])
         encoding="utf-8",
     )
 
-    snapshots_dir = backup_root / "snapshots"
-    snapshots_dir.mkdir(parents=True, exist_ok=True)
-    snapshot = snapshots_dir / datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
-    suffix = 1
-    while snapshot.exists():
-        snapshot = snapshots_dir / f"{snapshot.name}-{suffix}"
-        suffix += 1
-    os.replace(staging, snapshot)
-
-    latest_staging = backup_root / ".latest-staging"
-    previous = backup_root / ".latest-previous"
-    try:
-        if latest_staging.exists():
-            shutil.rmtree(latest_staging)
-        shutil.copytree(snapshot, latest_staging)
-        if previous.exists():
-            shutil.rmtree(previous)
-        if latest.exists():
-            os.replace(latest, previous)
-        os.replace(latest_staging, latest)
-    except Exception:
-        if not latest.exists() and previous.exists():
-            os.replace(previous, latest)
-        raise
-    finally:
-        if latest_staging.exists():
-            shutil.rmtree(latest_staging)
-        if previous.exists():
-            shutil.rmtree(previous)
-
-    prune_snapshots(backup_root)
-    return latest
+    return publish_snapshot(staging, backup_root, SNAPSHOT_RETENTION)
 
 
 def build_ics(items: list, component: str) -> str:
@@ -294,8 +254,7 @@ def run_backup() -> dict:
     log.info("Found %d calendars, %d task lists", len(calendars), len(todo_lists))
     log.info("=" * 60)
 
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=BACKUP_DIR))
+    staging = new_staging(BACKUP_DIR)
 
     stats = {"calendars": 0, "events": 0, "todo_lists": 0, "todos": 0}
     failures = []
@@ -340,7 +299,7 @@ def run_backup() -> dict:
         "stats": stats,
     }
     try:
-        latest = promote_snapshot(staging, BACKUP_DIR, metadata)
+        current = promote_snapshot(staging, BACKUP_DIR, metadata)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
@@ -349,7 +308,7 @@ def run_backup() -> dict:
     log.info("Backup complete!")
     log.info("  Calendars: %d (%d events)", stats["calendars"], stats["events"])
     log.info("  Task lists: %d (%d items)", stats["todo_lists"], stats["todos"])
-    log.info("  Output: %s", latest)
+    log.info("  Output: %s", current)
     log.info("=" * 60)
 
     return stats

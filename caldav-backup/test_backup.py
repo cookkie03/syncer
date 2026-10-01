@@ -15,6 +15,7 @@ os.environ.setdefault("CALDAV_USERNAME", "test")
 os.environ.setdefault("CALDAV_PASSWORD", "test")
 
 import backup
+from backup_storage import prune_snapshots
 
 
 def test_empty_collections_are_valid_ics():
@@ -53,7 +54,7 @@ def test_promote_snapshot_writes_manifest_checksums_and_latest(tmp_path, monkeyp
     monkeypatch.setenv("CALDAV_BACKUP_RETENTION", "2")
     result = backup.promote_snapshot(staging, backup_root, {"events": 0})
 
-    latest = backup_root / "latest"
+    latest = backup_root / "current"
     manifest = json.loads((latest / "manifest.json").read_text(encoding="utf-8"))
     assert result == latest
     assert (latest / "calendar_home.ics").read_text(encoding="utf-8").startswith("BEGIN")
@@ -62,7 +63,7 @@ def test_promote_snapshot_writes_manifest_checksums_and_latest(tmp_path, monkeyp
 
 def test_failed_run_does_not_replace_latest(tmp_path):
     backup_root = tmp_path / "backup"
-    latest = backup_root / "latest"
+    latest = backup_root / "current"
     latest.mkdir(parents=True)
     marker = latest / "marker.txt"
     marker.write_text("previous", encoding="utf-8")
@@ -77,7 +78,7 @@ def test_failed_run_does_not_replace_latest(tmp_path):
 
 def test_missing_previous_collection_keeps_latest(tmp_path):
     backup_root = tmp_path / "backup"
-    latest = backup_root / "latest"
+    latest = backup_root / "current"
     latest.mkdir(parents=True)
     previous = latest / "calendar_home.ics"
     previous.write_text("previous", encoding="utf-8")
@@ -98,7 +99,7 @@ def test_retention_keeps_newest_snapshots(tmp_path):
     for name in ("2026-09-08T000000Z", "2026-09-09T000000Z", "2026-09-10T000000Z"):
         (snapshots / name).mkdir()
 
-    backup.prune_snapshots(backup_root, retention=2)
+    prune_snapshots(backup_root, retention=2)
 
     assert sorted(path.name for path in snapshots.iterdir()) == [
         "2026-09-09T000000Z",

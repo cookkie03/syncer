@@ -33,11 +33,11 @@ class SpotifyAuthHelperTests(unittest.TestCase):
         self.assertEqual(params['code'], 'abc')
         self.assertEqual(params['state'], 'nonce')
 
-    def test_default_cache_path_lives_inside_repo_data_dir(self):
+    def test_default_cache_path_lives_inside_repo_state_dir(self):
         module = load_auth_helper_module(self)
         self.assertTrue(hasattr(module, "PROJECT_DIR"))
         self.assertTrue(hasattr(module, "default_cache_path"))
-        expected = module.PROJECT_DIR / "data" / ".cache"
+        expected = module.PROJECT_DIR / "state" / ".cache"
         self.assertEqual(module.default_cache_path(), expected)
 
     def test_auth_helper_does_not_open_local_browser_by_default(self):

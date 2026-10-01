@@ -12,6 +12,7 @@ Flow:
 import base64
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -34,8 +35,7 @@ TOKEN_FILE         = env("GOOGLE_GMAIL_TOKEN_FILE", "/data/token/google_gmail.js
 GOOGLE_CLIENT_JSON_FILE = env("GOOGLE_CLIENT_JSON_FILE", "/run/syncer-google-client/client_secret.json")
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 
-BACKUP_DIR         = Path(cfg("notion_backup.backup_dir", "/backup"))
-STATE_FILE         = BACKUP_DIR / ".last_notified_msg_id"
+STATE_FILE         = Path(os.environ.get("STATE_DIR", "/state")) / ".last_notified_msg_id"
 
 TELEGRAM_TIMEOUT   = cfg("shared.telegram_timeout", 10, int)
 
@@ -174,7 +174,7 @@ def find_export_link(links: list[str]) -> str | None:
 
 def main():
     log.info("=== notion-download-export starting ===")
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         service = get_gmail_service()
