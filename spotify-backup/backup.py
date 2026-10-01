@@ -166,6 +166,8 @@ def backup_playlists(sp, user_id=None):
                         else:
                             track_results = None
                 except Exception as exc:
+                    if getattr(exc, 'http_status', None) == 429:
+                        raise
                     if cached and cached.get('snapshot_id') == snapshot_id and cached.get('tracks'):
                         tracks[:] = cached['tracks']
                     logger.warning(

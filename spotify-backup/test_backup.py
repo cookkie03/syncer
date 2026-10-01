@@ -174,6 +174,39 @@ class SpotifyBackupTests(unittest.TestCase):
         self.assertEqual(playlists[1]["tracks_count"], 99)
         self.assertEqual(playlists[1]["tracks_error"], "http status: 403")
 
+    def test_rate_limit_preserves_current_backup_and_playlist_cache(self):
+        module = load_backup_module(self)
+        module.BACKUP_DIR = str(self.backup_dir)
+        module.STATE_DIR = str(self.state_dir)
+        module.CLIENT_ID = "client"
+        module.CLIENT_SECRET = "secret"
+        module.CACHE_PATH = str(self.state_dir / ".cache")
+        Path(module.CACHE_PATH).write_text("{}")
+        module.save_backup({"previous": True})
+        current = self.backup_dir / "current" / module.CURRENT_BACKUP_NAME
+        previous = current.read_bytes()
+        cache = self.state_dir / module.PLAYLIST_CACHE_NAME
+        cache.write_text('{}')
+
+        class RateLimited(Exception):
+            http_status = 429
+
+        class FakeSpotify:
+            def current_user_playlists(self):
+                return {"items": [{"id": "playlist", "name": "Playlist", "description": "",
+                          "owner": {"id": "owner"}, "collaborative": False, "public": True,
+                          "snapshot_id": "new", "tracks": {"total": 1}}], "next": None}
+
+            def playlist_items(self, *args, **kwargs):
+                raise RateLimited("Too many requests")
+
+        with patch.object(module, "get_spotify_client", return_value=FakeSpotify()), \
+             patch.object(module, "backup_profile", return_value={"id": "owner"}):
+            self.assertEqual(module.main(), 1)
+        self.assertEqual(current.read_bytes(), previous)
+        self.assertEqual(cache.read_text(), '{}')
+        self.assertEqual(len(list((self.backup_dir / "snapshots").iterdir())), 1)
+
     def test_access_limits_are_recorded_without_losing_other_backup_data(self):
         module = load_backup_module(self)
         module.BACKUP_DIR = str(self.backup_dir)
