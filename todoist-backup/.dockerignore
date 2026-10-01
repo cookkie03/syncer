@@ -1,0 +1,10 @@
+data/
+logs/
+exports/
+__pycache__/
+*.pyc
+test*.py
+.env*
+.DS_Store
+state/
+backup/
