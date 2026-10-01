@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-expected="caldav-backup google-contacts-backup spotify-backup vdirsyncer"
+expected="caldav-backup google-contacts-backup spotify-backup todoist-backup vdirsyncer"
 actual="$(docker compose config --services | sort | tr '\n' ' ' | sed 's/ $//')"
 expected_sorted="$(printf '%s\n' $expected | sort | tr '\n' ' ' | sed 's/ $//')"
 if [[ "$actual" != "$expected_sorted" ]]; then
@@ -25,6 +25,9 @@ for service in $expected; do
     exit 1
   fi
 done
+
+# Check durable progress and coverage rather than only Python dependencies.
+docker compose exec -T todoist-backup python /app/backup.py status --health
 
 python3 - <<'PY'
 import json

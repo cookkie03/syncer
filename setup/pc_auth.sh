@@ -7,7 +7,7 @@ cd "$PROJECT_DIR"
 
 if [ ! -f .env ]; then
   cp settings/.env.example .env
-  echo "Created .env. Fill the active CalDAV and Spotify settings, then rerun this command." >&2
+  echo "Created .env. Fill the active CalDAV, Spotify and Todoist settings, then rerun this command." >&2
   exit 1
 fi
 

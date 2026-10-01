@@ -34,6 +34,7 @@ class PortableCheckTests(unittest.TestCase):
                     "SPOTIFY_CLIENT_ID=spotify-id",
                     "SPOTIFY_CLIENT_SECRET=spotify-secret",
                     "SPOTIFY_REDIRECT_URI=http://127.0.0.1:9000/callback",
+                    "TODOIST_API_TOKEN=todoist-test-token",
                 )
             ),
             encoding="utf-8",
@@ -104,6 +105,14 @@ class PortableCheckTests(unittest.TestCase):
             '[{"name":"CHANGE_ME","caldav":"a","google":"b"}]', encoding="utf-8"
         )
         self.assertTrue(any("Calendar map" in error for error in self.module.check(config_only=True)))
+
+    def test_todoist_token_is_required_without_exposing_it(self):
+        path = self.root / ".env"
+        text = path.read_text().replace("TODOIST_API_TOKEN=todoist-test-token", "TODOIST_API_TOKEN=YOUR_VALUE_HERE")
+        path.write_text(text)
+        errors = self.module.check(config_only=True)
+        self.assertIn("Missing TODOIST_API_TOKEN in .env", errors)
+        self.assertNotIn("todoist-test-token", " ".join(errors))
 
 
 if __name__ == "__main__":
