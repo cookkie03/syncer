@@ -49,7 +49,7 @@ vtodo_notion:
 
   # Percorsi (nel container)
   state_file: "/data/sync_state.json"
-  log_dir: "/data/logs"
+  log_dir: "/logs"
 
 
 # ── notion-backup: Backup Notion via API ufficiale ────────────────────────

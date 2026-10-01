@@ -32,10 +32,10 @@ from pathlib import Path
 from time import time
 
 outputs = {
-    'CalDAV': ('caldav-backup/backup/latest/manifest.json', 12 * 3600),
-    'Google Contacts': ('google-contacts-backup/backup/latest.json', 48 * 3600),
-    'Spotify': ('spotify-backup/data/backup/spotify_backup_current.json', 12 * 3600),
-    'vdirsyncer': ('vdirsyncer/status/last-success', 4 * 3600),
+    'CalDAV': ('caldav-backup/backup/current/manifest.json', 12 * 3600),
+    'Google Contacts': ('google-contacts-backup/backup/current/manifest.json', 48 * 3600),
+    'Spotify': ('spotify-backup/backup/current/spotify_backup_current.json', 12 * 3600),
+    'vdirsyncer': ('vdirsyncer/state/status/last-success', 4 * 3600),
 }
 failed = False
 for service, (name, max_age) in outputs.items():
@@ -51,7 +51,7 @@ for service, (name, max_age) in outputs.items():
     else:
         print(f'OK: {service}: ultimo risultato {age / 3600:.1f} ore fa')
 
-spotify_current = Path('spotify-backup/data/backup/spotify_backup_current.json')
+spotify_current = Path('spotify-backup/backup/current/spotify_backup_current.json')
 if spotify_current.is_file():
     try:
         playlists = json.loads(spotify_current.read_text(encoding='utf-8')).get('playlists', [])

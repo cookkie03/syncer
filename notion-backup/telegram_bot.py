@@ -5,7 +5,7 @@ notion-backup — Telegram bot that receives a Notion export ZIP and saves it.
 Flow:
   1. User receives download link from download_export.py via Telegram
   2. User downloads the ZIP and sends it back to this bot
-  3. Bot saves it to /backup/zip_exports/notion_export_latest.zip
+  3. Bot saves it to /backup/current/zip_exports/notion_export_latest.zip
 """
 
 import logging
@@ -24,7 +24,7 @@ TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = env("TELEGRAM_CHAT_ID")
 
 BACKUP_DIR         = Path(cfg("notion_backup.backup_dir", "/backup"))
-ZIP_DIR            = BACKUP_DIR / "zip_exports"
+ZIP_DIR            = BACKUP_DIR / "current" / "zip_exports"
 EXPORT_FILENAME    = ZIP_DIR / "notion_export_latest.zip"
 
 logging.basicConfig(

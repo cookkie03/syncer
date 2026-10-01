@@ -24,6 +24,6 @@ COPY telegram_bot.py /app/telegram_bot.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-RUN mkdir -p /backup/json /backup/snapshots/daily /backup/snapshots/weekly /backup/zip_exports
+RUN mkdir -p /backup/current/json /backup/snapshots /backup/current/zip_exports /state /logs
 
 ENTRYPOINT ["/app/entrypoint.sh"]

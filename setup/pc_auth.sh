@@ -11,6 +11,7 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
+python3 setup/migrate-storage.py --apply
 python3 setup/check-portable.py --config-only
 
 INCLUDE_GMAIL=0

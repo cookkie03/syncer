@@ -13,7 +13,7 @@ import tempfile
 from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
-TOKEN_DIR = ROOT / "vdirsyncer" / "token"
+TOKEN_DIR = ROOT / "vdirsyncer" / "state" / "token"
 sys.path.insert(0, str(ROOT / "settings"))
 from google_auth import CLIENT_FILENAME, load_google_client, token_matches_client
 

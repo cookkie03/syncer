@@ -3,7 +3,7 @@ set -euo pipefail
 
 CRONTAB_FILE="/tmp/spotify-backup.cron"
 LOG_DIR="${LOG_DIR:-/logs}"
-BACKUP_DIR="${BACKUP_DIR:-/data/backup}"
+BACKUP_DIR="${BACKUP_DIR:-/backup}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/spotify-backup.log}"
 
 mkdir -p "$LOG_DIR" "$BACKUP_DIR"

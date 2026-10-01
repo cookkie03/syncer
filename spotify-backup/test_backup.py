@@ -52,26 +52,29 @@ class SpotifyBackupTests(unittest.TestCase):
         self.base = Path(self.tmpdir.name)
         self.backup_dir = self.base / "backup"
         self.backup_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir = self.base / "state"
+        self.state_dir.mkdir()
 
     def tearDown(self):
         self.tmpdir.cleanup()
 
-    def test_save_backup_keeps_current_latest_and_history(self):
+    def test_save_backup_keeps_one_current_pointer_and_history(self):
         module = load_backup_module(self)
         module.BACKUP_DIR = str(self.backup_dir)
+        module.STATE_DIR = str(self.state_dir)
 
         first = module.save_backup({"timestamp": "2026-07-17T10:00:00"})
         second = module.save_backup({"timestamp": "2026-07-17T14:00:00"})
 
-        self.assertEqual(first, str(self.backup_dir / "spotify_backup_current.json"))
+        self.assertEqual(first, str(self.backup_dir / "current" / "spotify_backup_current.json"))
         self.assertEqual(second, first)
-        self.assertTrue((self.backup_dir / "spotify_backup_current.json").exists())
+        self.assertTrue((self.backup_dir / "current" / "spotify_backup_current.json").exists())
         self.assertEqual(
-            len(list((self.backup_dir / "snapshots").glob("*.json"))),
+            len(list((self.backup_dir / "snapshots").glob("*/spotify_backup_current.json"))),
             2,
         )
         self.assertEqual(
-            json.loads((self.backup_dir / "latest" / "spotify_backup_current.json").read_text()),
+            json.loads((self.backup_dir / "current" / "spotify_backup_current.json").read_text()),
             {"timestamp": "2026-07-17T14:00:00"},
         )
 
@@ -113,6 +116,7 @@ class SpotifyBackupTests(unittest.TestCase):
     def test_backup_playlists_skips_inaccessible_playlists_and_keeps_metadata(self):
         module = load_backup_module(self)
         module.BACKUP_DIR = str(self.backup_dir)
+        module.STATE_DIR = str(self.state_dir)
 
         class FakeSpotify:
             def current_user_playlists(self):
@@ -122,7 +126,7 @@ class SpotifyBackupTests(unittest.TestCase):
                             "id": "ok-playlist",
                             "name": "Owned playlist",
                             "description": "ok",
-                            "owner": {"id": "cookie.manca03"},
+                            "owner": {"id": "test-owner"},
                             "collaborative": False,
                             "public": False,
                             "items": {"total": 1},
@@ -173,6 +177,7 @@ class SpotifyBackupTests(unittest.TestCase):
     def test_access_limits_are_recorded_without_losing_other_backup_data(self):
         module = load_backup_module(self)
         module.BACKUP_DIR = str(self.backup_dir)
+        module.STATE_DIR = str(self.state_dir)
         module.CLIENT_ID = "client"
         module.CLIENT_SECRET = "secret"
         module.CACHE_PATH = str(self.base / ".cache")
@@ -185,7 +190,7 @@ class SpotifyBackupTests(unittest.TestCase):
              patch.object(module, "backup_followed_artists", return_value=[]):
             self.assertEqual(module.main(), 0)
 
-        current = json.loads((self.backup_dir / module.CURRENT_BACKUP_NAME).read_text(encoding="utf-8"))
+        current = json.loads((self.backup_dir / "current" / module.CURRENT_BACKUP_NAME).read_text(encoding="utf-8"))
         self.assertEqual(current["playlist_items_unavailable"], 1)
         self.assertEqual(current["playlists"][0]["tracks_error"], "403")
         self.assertEqual(current["liked_tracks"], [])
@@ -193,7 +198,8 @@ class SpotifyBackupTests(unittest.TestCase):
     def test_playlist_with_cached_error_is_retried(self):
         module = load_backup_module(self)
         module.BACKUP_DIR = str(self.backup_dir)
-        (self.backup_dir / module.PLAYLIST_CACHE_NAME).write_text(json.dumps({
+        module.STATE_DIR = str(self.state_dir)
+        (self.state_dir / module.PLAYLIST_CACHE_NAME).write_text(json.dumps({
             "playlist": {"snapshot_id": "same", "tracks": [], "tracks_error": "403"}
         }), encoding="utf-8")
 
@@ -217,6 +223,7 @@ class SpotifyBackupTests(unittest.TestCase):
     def test_followed_playlist_items_are_not_requested_when_api_disallows_them(self):
         module = load_backup_module(self)
         module.BACKUP_DIR = str(self.backup_dir)
+        module.STATE_DIR = str(self.state_dir)
 
         class FakeSpotify:
             def current_user_playlists(self):
@@ -236,6 +243,7 @@ class SpotifyBackupTests(unittest.TestCase):
     def test_backup_playlists_skips_items_without_track_but_keeps_other_tracks(self):
         module = load_backup_module(self)
         module.BACKUP_DIR = str(self.backup_dir)
+        module.STATE_DIR = str(self.state_dir)
 
         class FakeSpotify:
             def current_user_playlists(self):
@@ -245,7 +253,7 @@ class SpotifyBackupTests(unittest.TestCase):
                             "id": "mixed-playlist",
                             "name": "Mixed playlist",
                             "description": "mixed",
-                            "owner": {"id": "cookie.manca03"},
+                            "owner": {"id": "test-owner"},
                             "collaborative": False,
                             "public": False,
                             "items": {"total": 3},
@@ -314,8 +322,9 @@ class SpotifyBackupTests(unittest.TestCase):
     def test_backup_playlists_reuses_cached_tracks_when_snapshot_is_unchanged(self):
         module = load_backup_module(self)
         module.BACKUP_DIR = str(self.backup_dir)
+        module.STATE_DIR = str(self.state_dir)
 
-        cache_path = self.backup_dir / "playlist_track_cache.json"
+        cache_path = self.state_dir / "playlist_track_cache.json"
         cache_path.write_text(
             json.dumps(
                 {
@@ -350,7 +359,7 @@ class SpotifyBackupTests(unittest.TestCase):
                             "id": "cached-playlist",
                             "name": "Cached playlist",
                             "description": "cached",
-                            "owner": {"id": "cookie.manca03"},
+                            "owner": {"id": "test-owner"},
                             "collaborative": False,
                             "public": False,
                             "snapshot_id": "snapshot-1",

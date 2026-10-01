@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
 Spotify Backup - Export user data to JSON
-Run via Docker: docker run -v $(pwd)/data:/data spotify-backup
+Run via Docker Compose from the repository root.
 """
 
 import os
 import json
 import logging
+import sys
 import shutil
+from pathlib import Path
 from datetime import datetime
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from backup_storage import new_staging, publish_snapshot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,11 +27,11 @@ logger = logging.getLogger(__name__)
 CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
 REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://127.0.0.1:9000/callback')
-BACKUP_DIR = os.getenv('BACKUP_DIR', '/data/backup')
-CACHE_PATH = os.getenv('CACHE_PATH', '/data/.cache')
+BACKUP_DIR = os.getenv('BACKUP_DIR', '/backup')
+STATE_DIR = os.getenv('STATE_DIR', '/state')
+CACHE_PATH = os.getenv('CACHE_PATH', '/state/.cache')
 CURRENT_BACKUP_NAME = 'spotify_backup_current.json'
 PLAYLIST_CACHE_NAME = 'playlist_track_cache.json'
-SNAPSHOT_DIR = os.getenv('SPOTIFY_SNAPSHOT_DIR')
 SNAPSHOT_RETENTION = max(1, int(os.getenv('SPOTIFY_SNAPSHOT_RETENTION', '14')))
 
 # Spotify scopes needed
@@ -61,10 +66,10 @@ def get_spotify_client():
 
 
 def save_json_file(filename, data):
-    """Atomically save JSON data to BACKUP_DIR."""
-    os.makedirs(BACKUP_DIR, exist_ok=True)
+    """Atomically save the incremental playlist cache to STATE_DIR."""
+    os.makedirs(STATE_DIR, exist_ok=True)
 
-    path = os.path.join(BACKUP_DIR, filename)
+    path = os.path.join(STATE_DIR, filename)
     temp_path = f'{path}.tmp'
 
     with open(temp_path, 'w', encoding='utf-8') as f:
@@ -75,8 +80,8 @@ def save_json_file(filename, data):
 
 
 def load_json_file(filename, default):
-    """Load JSON data from BACKUP_DIR if present."""
-    path = os.path.join(BACKUP_DIR, filename)
+    """Load incremental cache data from STATE_DIR if present."""
+    path = os.path.join(STATE_DIR, filename)
     if not os.path.exists(path):
         return default
 
@@ -278,24 +283,20 @@ def backup_followed_artists(sp):
 
 
 def save_backup(data):
-    """Save the current backup and a retained timestamped snapshot."""
-    filename = save_json_file(CURRENT_BACKUP_NAME, data)
-    snapshot_root = os.path.abspath(SNAPSHOT_DIR or os.path.join(BACKUP_DIR, 'snapshots'))
-    os.makedirs(snapshot_root, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y-%m-%dT%H%M%S%f')
-    snapshot_path = os.path.join(snapshot_root, f'{timestamp}-{CURRENT_BACKUP_NAME}')
-    shutil.copy2(filename, snapshot_path)
-    latest_dir = os.path.join(BACKUP_DIR, 'latest')
-    os.makedirs(latest_dir, exist_ok=True)
-    shutil.copy2(filename, os.path.join(latest_dir, CURRENT_BACKUP_NAME))
-    snapshots = sorted(
-        (os.path.join(snapshot_root, name) for name in os.listdir(snapshot_root)),
-        reverse=True,
-    )
-    for old_snapshot in snapshots[SNAPSHOT_RETENTION:]:
-        os.unlink(old_snapshot)
-    logger.info(f"Backup saved to {filename}")
-    return filename
+    """Publish one full snapshot and atomically update the current pointer."""
+    root = Path(BACKUP_DIR)
+    staging = new_staging(root)
+    try:
+        (staging / CURRENT_BACKUP_NAME).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        current = publish_snapshot(staging, root, SNAPSHOT_RETENTION)
+        filename = str(current / CURRENT_BACKUP_NAME)
+        logger.info("Backup saved to %s", filename)
+        return filename
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
 
 
 def main():
