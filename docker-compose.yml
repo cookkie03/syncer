@@ -1,5 +1,34 @@
 services:
 
+  # Todoist: read-only incremental account backup, prepared on the PC.
+  todoist-backup:
+    build:
+      context: ./todoist-backup
+    image: caldav-sync/todoist-backup:local
+    restart: unless-stopped
+    environment:
+      - TODOIST_API_TOKEN=${TODOIST_API_TOKEN:-}
+      - TODOIST_BACKUP_SCHEDULE=${TODOIST_BACKUP_SCHEDULE:-0 */4 * * *}
+      - TODOIST_MAX_REQUESTS=${TODOIST_MAX_REQUESTS:-600}
+      - TODOIST_MAX_RUN_SECONDS=${TODOIST_MAX_RUN_SECONDS:-1800}
+      - TODOIST_HISTORY_WINDOWS=${TODOIST_HISTORY_WINDOWS:-20}
+      - TODOIST_STATE_DIR=/state
+      - TODOIST_BACKUP_DIR=/backup
+      - TODOIST_LEGACY_DIR=/legacy-data
+      - LOG_DIR=/logs
+      - TZ=Europe/Amsterdam
+    volumes:
+      - ./todoist-backup/state:/state
+      - ./todoist-backup/backup:/backup
+      - ./todoist-backup/data:/legacy-data:ro
+      - ./todoist-backup/logs:/logs
+    healthcheck:
+      test: ["CMD", "python", "/app/backup.py", "status", "--health"]
+      interval: 5m
+      timeout: 30s
+      retries: 3
+      start_period: 35m
+
   # ── spotify-backup: headless Spotify mirror backup ────────────────────────
   spotify-backup:
     build:
