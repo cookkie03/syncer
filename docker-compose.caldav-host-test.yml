@@ -1,0 +1,16 @@
+# Temporary, one-shot NAS networking comparison. Does not alter the main stack.
+services:
+  caldav-backup:
+    image: caldav-sync/caldav-backup:local
+    network_mode: host
+    env_file: .env
+    entrypoint: ["python", "/app/backup.py"]
+    command: []
+    environment:
+      CALDAV_BACKUP_DIR: /backup
+      CALDAV_BACKUP_ATTEMPTS: "1"
+      CALDAV_BACKUP_TIMEOUT: "60"
+      CALDAV_BACKUP_RETENTION: "${CALDAV_BACKUP_RETENTION:-180}"
+    volumes:
+      - ./caldav-backup/backup:/backup
+      - ./backup_storage.py:/app/backup_storage.py:ro

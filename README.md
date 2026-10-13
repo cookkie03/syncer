@@ -66,7 +66,7 @@ docker compose exec vdirsyncer /app/sync-notify.sh
 
 `check-health.sh` controlla che siano avviati solo i cinque servizi previsti, che risultino healthy e che i risultati recenti esistano. Per Todoist mostra anche copertura, cronologia e avanzamento persistente. Il comando `sync-notify.sh` esegue subito il controllo degli abbinamenti e il sync. Il sync di Calendar è bidirezionale; in caso di conflitto prevale CalDAV.
 
-I container CalDAV, Contacts, Spotify e vdirsyncer possono risultare `healthy` anche se il primo backup fallisce: i loro healthcheck controllano le dipendenze Python. Verifica nei log `Backup complete!` per quei backup e una conclusione senza errori per il sync. Todoist controlla invece i dati persistenti: un errore fatale, un archivio incoerente o 12 ore senza avanzamento lo rendono non healthy; i limiti di copertura restano visibili anche quando il servizio funziona. Spotify salva il profilo, la libreria e i metadati delle playlist seguite; l'API permette di leggere i brani solo delle playlist possedute o collaborative. Il backup registra `playlist_items_unavailable` e `check-health.sh` mostra un avviso quando mancano brani per questo limite. CalDAV, Contacts e Spotify pubblicano `backup/current` solo dopo aver completato il nuovo snapshot. Il collegamento è relativo e portabile. Un errore Spotify 429 interrompe il ciclo e conserva il backup precedente.
+Contacts, Spotify e vdirsyncer possono risultare `healthy` anche se il primo ciclo fallisce: i loro healthcheck controllano le dipendenze Python. CalDAV verifica invece inventario e checksum dello snapshot corrente, età massima di 12 ore e risultato dell’ultimo tentativo: un backup fallito lo rende non healthy. Verifica nei log `Backup complete!` per quei backup e una conclusione senza errori per il sync. Todoist controlla invece i dati persistenti: un errore fatale, un archivio incoerente o 12 ore senza avanzamento lo rendono non healthy; i limiti di copertura restano visibili anche quando il servizio funziona. Spotify salva il profilo, la libreria e i metadati delle playlist seguite; l'API permette di leggere i brani solo delle playlist possedute o collaborative. Il backup registra `playlist_items_unavailable` e `check-health.sh` mostra un avviso quando mancano brani per questo limite. CalDAV, Contacts e Spotify pubblicano `backup/current` solo dopo aver completato il nuovo snapshot. Il collegamento è relativo e portabile. Un errore Spotify 429 interrompe il ciclo e conserva il backup precedente.
 
 Se l'autorizzazione Google non è più valida, sostituisci se necessario `setup/google/client_secret.json`, esegui sul PC `bash setup/pc_auth.sh --force`, ricopia il JSON e i nuovi token sul NAS e ricrea i container interessati con `docker compose up -d --force-recreate vdirsyncer google-contacts-backup`.
 
@@ -102,9 +102,30 @@ I token Google condivisi restano in **`vdirsyncer/state/token/`**: Calendar li m
 
 `backup/current` è un collegamento relativo allo snapshot completo corrente per CalDAV, Contacts e Spotify. CalDAV esporta un nuovo insieme completo di ICS; Contacts crea un insieme completo di VCF e usa hardlink per i contatti invariati; Spotify scrive un nuovo JSON completo. Nessun servizio sposta i file del backup corrente durante la raccolta dei nuovi dati. Un errore di raccolta lascia il precedente backup corrente disponibile.
 
+### Verificare CalDAV
+
+Il servizio CalDAV usa inizialmente la rete del NAS (`network_mode: host`), senza forzare il dominio del NAS verso il gateway Docker. La prova sul NAS del 10 ottobre 2026 ha completato il backup con questa rete, mentre la rete bridge riceveva HTTP 401 con le stesse credenziali. Questa impostazione riguarda soltanto `caldav-backup`. Per un ambiente diverso puoi impostare `CALDAV_BACKUP_NETWORK_MODE=bridge` e un `CALDAV_URL` raggiungibile da quel container. La prova singola equivalente sul NAS è `docker compose -f docker-compose.caldav-host-test.yml -p syncer-caldav-test run --rm -T caldav-backup`.
+
+Il backup usa richieste con timeout di 60 secondi. Un errore 502 o una connessione interrotta viene ritentato fino a cinque volte, con pause progressive; dopo un ciclo fallito riprova entro cinque minuti. Un 401/403 sospende automaticamente le richieste del servizio fino al riavvio del container: richiede la verifica di endpoint, credenziali, permessi e blocchi degli IP in DSM. Dopo aver corretto l’accesso, ricrea o riavvia il container. Lo stato dell’ultimo tentativo è in `caldav-backup/backup/status.json`, senza risposte HTML o credenziali. Un lock impedisce backup concorrenti.
+
+La raccolta avviene in una directory temporanea: errori di lettura, nomi di file duplicati o raccolte precedenti mancanti impediscono la pubblicazione. Lo snapshot contiene gli ICS, `manifest.json` con SHA-256 e il marcatore `COMPLETE`. Prima della pubblicazione vengono riletti tutti i file e confrontati i checksum. Le ricorrenze e i fusi orari presenti nei dati esportati sono conservati. La verifica controlla i file salvati; un ripristino su un altro server deve essere verificato separatamente.
+
+Dal terminale SSH, dentro la cartella del progetto:
+
+```bash
+docker compose exec -T caldav-backup python < setup/diagnose-caldav.py
+docker compose up -d --build --no-deps caldav-backup
+docker compose logs --tail=80 caldav-backup
+docker compose exec -T caldav-backup python /app/backup.py --verify
+```
+
+La diagnosi effettua soltanto PROPFIND e non modifica calendari o promemoria. Per provare la `.env` attuale anche quando il container esistente contiene vecchie variabili, usa `docker compose run --rm --no-deps -T --entrypoint python caldav-backup < setup/diagnose-caldav.py`. Un 401 su entrambi i percorsi non identifica da solo quale credenziale o impostazione NAS sia errata.
+
+Questi snapshot stanno sullo stesso NAS dei dati originali: includi la cartella in una copia su un altro dispositivo o fuori sede per proteggerla anche da un guasto o dalla perdita del NAS.
+
 ### Conservazione degli snapshot
 
-Per questi tre servizi il valore iniziale è **14 snapshot completi in totale**, incluso quello corrente. Il limite è un numero di esecuzioni riuscite, non un numero di giorni. Con i valori iniziali corrisponde a circa 56 ore per CalDAV/Spotify e 14 giorni per Contacts.
+CalDAV conserva inizialmente **180 snapshot completi**, incluso quello corrente: circa 30 giorni con un backup ogni quattro ore. Spotify e Contacts conservano **14 snapshot**, circa 56 ore e 14 giorni rispettivamente. Il limite conta le esecuzioni riuscite, non i giorni; eventuali valori nella `.env` prevalgono sui valori iniziali.
 
 Per conservare soltanto il backup corrente, aggiungi a `.env`:
 

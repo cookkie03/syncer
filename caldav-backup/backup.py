@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import logging
@@ -29,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backup_storage import new_staging, publish_snapshot
 
 # ── Logging ────────────────────────────────────────────────────────────────
+logging.Formatter.converter = time.gmtime
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -54,7 +56,9 @@ CALDAV_PASSWORD = require_env("CALDAV_PASSWORD")
 
 # Container backup root; Compose mounts the service backup directory here.
 BACKUP_DIR = Path(os.environ.get("CALDAV_BACKUP_DIR", "/backup"))
-SNAPSHOT_RETENTION = max(1, int(os.environ.get("CALDAV_BACKUP_RETENTION", "14")))
+SNAPSHOT_RETENTION = max(1, int(os.environ.get("CALDAV_BACKUP_RETENTION", "180")))
+REQUEST_TIMEOUT = max(1, int(os.environ.get("CALDAV_BACKUP_TIMEOUT", "60")))
+RETRY_ATTEMPTS = max(1, int(os.environ.get("CALDAV_BACKUP_ATTEMPTS", "5")))
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -68,6 +72,7 @@ def connect_caldav() -> caldav.DAVClient:
         url=CALDAV_URL,
         username=CALDAV_USERNAME,
         password=CALDAV_PASSWORD,
+        timeout=REQUEST_TIMEOUT,
     )
     return client
 
@@ -84,7 +89,7 @@ def discover_all_calendars(client: caldav.DAVClient) -> tuple[list[dict], list[d
     todo_lists = []
 
     for cal in all_calendars:
-        display_name = str(cal.name) if cal.name else cal.url.split("/")[-2]
+        display_name = str(cal.name) if cal.name else str(cal.url).rstrip("/").split("/")[-1]
         cal_url = str(cal.url)
 
         # Determine type by checking URL pattern or trying to fetch
@@ -126,8 +131,11 @@ def discover_all_calendars(client: caldav.DAVClient) -> tuple[list[dict], list[d
             event_error = exc
             log.debug("[Discover] No events in %s: %s", display_name, exc)
 
-        if (todo_type is True and todo_error) or (todo_type is False and event_error) or (todo_error and event_error):
+        if (todo_type is True and todo_error) or (todo_type is False and event_error) or (todo_type is None and (todo_error or event_error)):
             raise RuntimeError(f"Could not read collection {display_name}") from (todo_error or event_error)
+        if todo_type is None and not todos and not events:
+            calendars.append({"name": display_name, "url": cal_url, "items": [], "count": 0})
+            todo_lists.append({"name": display_name, "url": cal_url, "items": [], "count": 0})
 
     return calendars, todo_lists
 
@@ -139,7 +147,8 @@ def export_calendar(events: list, name: str, backup_path: Path) -> int:
     try:
         ics_content = build_ics_from_vevents(events)
 
-        ics_path.write_text(ics_content, encoding="utf-8")
+        with ics_path.open("x", encoding="utf-8") as handle:
+            handle.write(ics_content)
         log.info("[Export] Calendar '%s' -> %s (%d events)", name, ics_path.name, len(events or []))
         return len(events)
 
@@ -155,7 +164,8 @@ def export_todo_list(todos: list, name: str, backup_path: Path) -> int:
     try:
         ics_content = build_ics_from_vtodos(todos)
 
-        ics_path.write_text(ics_content, encoding="utf-8")
+        with ics_path.open("x", encoding="utf-8") as handle:
+            handle.write(ics_content)
         log.info("[Export] Tasks '%s' -> %s (%d items)", name, ics_path.name, len(todos or []))
         return len(todos)
 
@@ -207,8 +217,85 @@ def promote_snapshot(staging: Path, backup_root: Path, metadata: dict[str, Any])
         json.dumps(manifest, indent=2, ensure_ascii=False, default=str) + "\n",
         encoding="utf-8",
     )
+    verify_snapshot(staging)
+    (staging / "COMPLETE").write_text(manifest["timestamp"] + "\n", encoding="utf-8")
 
     return publish_snapshot(staging, backup_root, SNAPSHOT_RETENTION)
+
+
+def verify_snapshot(snapshot: Path) -> dict:
+    """Read every exported byte and check it against the manifest."""
+    manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+    checksums = manifest.get("checksums", {})
+    if not checksums:
+        raise RuntimeError("Snapshot has no ICS checksums")
+    actual = {p.name for p in snapshot.glob("*.ics")}
+    if actual != set(checksums):
+        raise RuntimeError("Snapshot file inventory does not match manifest")
+    for name, expected in checksums.items():
+        if Path(name).name != name or sha256_file(snapshot / name) != expected:
+            raise RuntimeError("Snapshot checksum mismatch")
+    return manifest
+
+
+def check_health() -> None:
+    manifest = verify_snapshot(BACKUP_DIR / "current")
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(manifest["timestamp"])).total_seconds()
+    if age < -300 or age > int(os.environ.get("CALDAV_BACKUP_MAX_AGE", "43200")):
+        raise RuntimeError("Last successful backup is too old")
+    status_path = BACKUP_DIR / "status.json"
+    if status_path.exists() and json.loads(status_path.read_text())["result"] == "failed":
+        raise RuntimeError("Most recent backup attempt failed")
+    log.info("Verified current backup: checksums OK, age %.1f hours", age / 3600)
+
+
+def error_summary(exc: Exception) -> tuple[str, bool]:
+    """Expose the cause without dumping HTML, remote data or credentials."""
+    chain = []
+    while exc is not None and id(exc) not in {id(e) for e in chain}:
+        chain.append(exc)
+        exc = exc.__cause__ or exc.__context__
+    if any(isinstance(e, caldav.lib.error.AuthorizationError) for e in chain):
+        return "HTTP 401: CalDAV authorization rejected; check endpoint and credentials", False
+    for e in chain:
+        if "502" in str(e):
+            return "HTTP 502: NAS gateway/backend unavailable", True
+        if "403" in str(e):
+            return "HTTP 403: CalDAV access denied", False
+    if any(any(word in type(e).__name__.lower() for word in ("timeout", "connection"))
+           for e in chain):
+        return "CalDAV network error or request timeout", True
+    return type(chain[0]).__name__ + ": backup failed; current snapshot preserved", False
+
+
+def backup_with_retries() -> bool:
+    """Serialize runs, retry transient failures, and persist the last outcome."""
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    with (BACKUP_DIR / ".backup.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Another backup is already running")
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                stats = run_backup()
+                status = {"result": "complete", "stats": stats}
+                success = True
+            except Exception as exc:
+                summary, transient = error_summary(exc)
+                log.error("Attempt %d/%d: %s", attempt, RETRY_ATTEMPTS, summary)
+                status = {"result": "failed", "error": summary,
+                          "requires_intervention": summary.startswith(("HTTP 401", "HTTP 403"))}
+                success = False
+            status["timestamp"] = datetime.now(timezone.utc).isoformat()
+            temporary = BACKUP_DIR / ".status.tmp"
+            temporary.write_text(json.dumps(status, indent=2) + "\n", encoding="utf-8")
+            os.replace(temporary, BACKUP_DIR / "status.json")
+            if success or not transient or attempt == RETRY_ATTEMPTS:
+                return success
+            delay = min(120, 15 * 2 ** (attempt - 1))
+            log.info("Retrying in %d seconds", delay)
+            time.sleep(delay)
 
 
 def build_ics(items: list, component: str) -> str:
@@ -248,7 +335,10 @@ def run_backup() -> dict:
 
     # Discover all calendars
     log.info("Discovering calendars...")
-    calendars, todo_lists = discover_all_calendars(client)
+    try:
+        calendars, todo_lists = discover_all_calendars(client)
+    finally:
+        client.close()
 
     log.info("=" * 60)
     log.info("Found %d calendars, %d task lists", len(calendars), len(todo_lists))
@@ -316,6 +406,8 @@ def run_backup() -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CalDAV backup tool")
+    parser.add_argument("--health", action="store_true", help="Verify current backup and freshness")
+    parser.add_argument("--verify", action="store_true", help="Verify current snapshot checksums")
     parser.add_argument(
         "--watch", "-w",
         action="store_true",
@@ -329,20 +421,46 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.health or args.verify:
+        try:
+            if args.health:
+                check_health()
+            else:
+                verify_snapshot(BACKUP_DIR / "current")
+                log.info("Current snapshot checksums verified")
+        except Exception as exc:
+            log.error("Backup verification failed: %s", type(exc).__name__)
+            sys.exit(1)
+        return
+    if args.interval <= 0:
+        parser.error("--interval must be positive")
+
     if args.watch:
         log.info("Starting watch mode (backup every %d seconds, Ctrl+C to stop)", args.interval)
+        authorization_paused = False
         try:
             while True:
+                if authorization_paused:
+                    time.sleep(300)
+                    continue
                 try:
-                    run_backup()
+                    success = backup_with_retries()
                 except Exception as exc:
-                    log.error("Backup failed: %s", exc)
-                log.info("Waiting %d seconds...", args.interval)
-                time.sleep(args.interval)
+                    log.error("Backup failed: %s", error_summary(exc)[0])
+                    success = False
+                status_path = BACKUP_DIR / "status.json"
+                if not success and status_path.exists():
+                    authorization_paused = bool(json.loads(status_path.read_text()).get("requires_intervention"))
+                    if authorization_paused:
+                        log.error("Automatic backups paused after authorization rejection. Correct NAS access, then restart this container.")
+                delay = args.interval if success else min(args.interval, 300)
+                log.info("Waiting %d seconds...", delay)
+                time.sleep(delay)
         except KeyboardInterrupt:
             log.info("Watch mode stopped.")
     else:
-        run_backup()
+        if not backup_with_retries():
+            sys.exit(1)
 
 
 if __name__ == "__main__":
