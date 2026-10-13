@@ -63,7 +63,7 @@ services:
     env_file: .env
     extra_hosts:
       - host.docker.internal:host-gateway
-      - ${CALDAV_HOST_ALIAS:-synologyds224.tail234659.ts.net}:host-gateway
+      - ${CALDAV_HOST_ALIAS:-caldav.example.invalid}:host-gateway
     volumes:
       - ./vdirsyncer/state/config:/data/vdirsyncer
       - ./vdirsyncer/state/status:/data/status
@@ -105,30 +105,45 @@ services:
   #     retries: 3
   #     start_period: 30s
 
-  # ── notion-backup: temporarily disabled ───────────────────────────────────
-  # notion-backup:
-  #   build:
-  #     context: ./notion-backup
-  #   image: caldav-sync/notion-backup:local
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   volumes:
-  #     - ./notion-backup/backup:/backup
-  #     - ./notion-backup/state:/state
-  #     - ./notion-backup/logs:/logs
-  #     - ./vdirsyncer/state/token:/data/token:ro
-  #     - ./settings:/app/project-settings:ro
-  #     - ./setup/google:/run/syncer-google-client:ro
-  #   environment:
-  #     - GOOGLE_GMAIL_TOKEN_FILE=/data/token/google_gmail.json
-  #     - GOOGLE_CLIENT_JSON_FILE=/run/syncer-google-client/client_secret.json
-  #     - LOG_DIR=/logs
-  #   healthcheck:
-  #     test: ["CMD", "python3", "-c", "import requests; print('ok')"]
-  #     interval: 5m
-  #     timeout: 10s
-  #     retries: 3
-  #     start_period: 30s
+  # Notion: official API only. Opt-in until workspace access is verified.
+  notion-backup:
+    profiles: ["notion"]
+    build:
+      context: ./notion-backup
+    image: caldav-sync/notion-backup:local
+    restart: unless-stopped
+    # Per-container caps for the 2 GiB NAS; equal RAM+swap prohibits swapping.
+    mem_limit: "${NOTION_MEMORY_LIMIT:-256m}"
+    memswap_limit: "${NOTION_MEMORY_LIMIT:-256m}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    environment:
+      - NOTION_PAT=${NOTION_PAT:-}
+      - NOTION_TOKEN=${NOTION_TOKEN:-}
+      - NOTION_ROOTS=${NOTION_ROOTS:-}
+      - NOTION_BACKUP_DIR=/backup
+      - NOTION_BACKUP_INTERVAL_SECONDS=${NOTION_BACKUP_INTERVAL_SECONDS:-14400}
+      - NOTION_BACKUP_RETENTION=${NOTION_BACKUP_RETENTION:-1}
+      - NOTION_BACKUP_MAX_AGE=${NOTION_BACKUP_MAX_AGE:-43200}
+      - NOTION_MAX_FILE_BYTES=${NOTION_MAX_FILE_BYTES:-536870912}
+      - NOTION_ALLOW_MISSING=${NOTION_ALLOW_MISSING:-0}
+      - NOTION_MAX_REQUESTS=${NOTION_MAX_REQUESTS:-20000}
+      - NOTION_API_DELAY_SECONDS=${NOTION_API_DELAY_SECONDS:-0.75}
+      - NOTION_LOG_DIR=/logs
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./notion-backup/backup:/backup
+      - ./notion-backup/logs:/logs
+      - ./backup_storage.py:/app/backup_storage.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "/app/backup.py", "--health"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 180m
 
   # ── caldav-backup: backup CalDAV calendars and tasks to ICS ───────────────
   caldav-backup:
@@ -139,7 +154,7 @@ services:
     env_file: .env
     extra_hosts:
       - host.docker.internal:host-gateway
-      - ${CALDAV_HOST_ALIAS:-synologyds224.tail234659.ts.net}:host-gateway
+      - ${CALDAV_HOST_ALIAS:-caldav.example.invalid}:host-gateway
     volumes:
       - ./caldav-backup/backup:/backup
       - ./backup_storage.py:/app/backup_storage.py:ro

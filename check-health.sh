@@ -5,6 +5,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 expected="caldav-backup google-contacts-backup spotify-backup todoist-backup vdirsyncer"
+if [[ ",${COMPOSE_PROFILES:-}," == *,notion,* ]]; then
+  expected="$expected notion-backup"
+fi
 actual="$(docker compose config --services | sort | tr '\n' ' ' | sed 's/ $//')"
 expected_sorted="$(printf '%s\n' $expected | sort | tr '\n' ' ' | sed 's/ $//')"
 if [[ "$actual" != "$expected_sorted" ]]; then
@@ -28,6 +31,9 @@ done
 
 # Check durable progress and coverage rather than only Python dependencies.
 docker compose exec -T todoist-backup python /app/backup.py status --health
+if [[ ",${COMPOSE_PROFILES:-}," == *,notion,* ]]; then
+  docker compose exec -T notion-backup python /app/backup.py --health
+fi
 
 python3 - <<'PY'
 import json
