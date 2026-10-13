@@ -1,7 +1,8 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # syncer — Configurazione globale
 #
-# Parametri letti da config_loader (Notion disattivato e Google Contacts).
+# Parametri letti da config_loader (helper legacy Notion e Google Contacts).
+# Il nuovo backup Notion usa soltanto le variabili NOTION_* nel .env.
 # Gli intervalli degli altri servizi attivi sono definiti in Compose/.env.
 # Ogni valore può essere sovrascritto via variabile d'ambiente:
 #   la env var ha priorità → poi service-options.yaml → poi default nel codice.
@@ -52,11 +53,9 @@ vtodo_notion:
   log_dir: "/logs"
 
 
-# ── notion-backup: Backup Notion via API ufficiale ────────────────────────
+# ── Helper legacy ZIP Notion, non avviati dal servizio attuale ───────────
 
 notion_backup:
-  rate_limit_rps: 3               # Richieste al secondo verso Notion API
-  notion_api_version: "2022-06-28"
   backup_dir: "/backup"           # Percorso nel container
 
 

@@ -3,7 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install dependencies
-RUN pip install --no-cache-dir caldav
+RUN pip install --no-cache-dir caldav==3.4.0
 
 # Copy backup script
 COPY backup.py .

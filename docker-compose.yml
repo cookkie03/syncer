@@ -50,7 +50,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import spotipy, requests; print('ok')"]
       interval: 5m
-      timeout: 10s
+      timeout: 60s
       retries: 3
       start_period: 30s
 
@@ -152,24 +152,26 @@ services:
     image: caldav-sync/caldav-backup:local
     restart: unless-stopped
     env_file: .env
-    extra_hosts:
-      - host.docker.internal:host-gateway
-      - ${CALDAV_HOST_ALIAS:-caldav.example.invalid}:host-gateway
+    # CalDAV is hosted on this NAS: use its network, as verified by the backup.
+    network_mode: "${CALDAV_BACKUP_NETWORK_MODE:-host}"
     volumes:
       - ./caldav-backup/backup:/backup
       - ./backup_storage.py:/app/backup_storage.py:ro
       - ./caldav-backup/logs:/logs
     environment:
       - CALDAV_BACKUP_DIR=/backup
-      - CALDAV_BACKUP_RETENTION=${CALDAV_BACKUP_RETENTION:-14}
+      - CALDAV_BACKUP_RETENTION=${CALDAV_BACKUP_RETENTION:-180}
+      - CALDAV_BACKUP_TIMEOUT=${CALDAV_BACKUP_TIMEOUT:-60}
+      - CALDAV_BACKUP_ATTEMPTS=${CALDAV_BACKUP_ATTEMPTS:-5}
+      - CALDAV_BACKUP_MAX_AGE=${CALDAV_BACKUP_MAX_AGE:-43200}
       - LOG_DIR=/logs
     command: ["--watch", "--interval", "${CALDAV_BACKUP_INTERVAL_SECONDS:-14400}"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import caldav; print('ok')"]
+      test: ["CMD", "python", "/app/backup.py", "--health"]
       interval: 5m
-      timeout: 10s
+      timeout: 60s
       retries: 3
-      start_period: 30s
+      start_period: 10m
 
   # ── google-contacts-backup: Incremental Google Contacts Backup ────────────
   google-contacts-backup:
