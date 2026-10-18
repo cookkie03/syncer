@@ -260,7 +260,7 @@ The local runner loads only `NOTION_*` keys from `.env`, honors explicit process
 
 Unchanged files reuse hardlinks (copy fallback). Reused files are never written in place. All work occurs in a new staging folder; network/download/pagination/truncation errors leave `current` untouched. Only a successful snapshot updates the pointer, then retention prunes old dated snapshots. Legacy archives are never pruned.
 
-Disappeared objects can mean deletion or lost permissions. Default `NOTION_ALLOW_MISSING=0` refuses to replace the previous inventory. After investigating, set it to 1 for a deliberate run if those removals are expected, then restore 0. This does not modify Notion.
+Resources in Notion Trash (including descendants of trashed databases/pages) are excluded from new snapshots. Confirmed deletions are accepted automatically and recorded in the manifest; older retained snapshots are unchanged. A resource deleted during traversal is skipped only when a fresh metadata read confirms its Trash status. Disappeared objects can also mean lost permissions: default `NOTION_ALLOW_MISSING=0` refuses to replace the previous inventory for unexplained disappearances or ambiguous 404 responses. After investigating, set it to 1 for a deliberate run if those removals are expected, then restore 0. This does not modify Notion.
 
 ### Coverage limitations
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from functools import wraps
 import fcntl
 import hashlib
 import html
@@ -95,6 +96,34 @@ class DiskMap(MutableMapping):
         return len(self.keys_index)
 
 
+def trashed(obj):
+    return any(obj.get(key) is True for key in ("in_trash", "is_archived", "archived"))
+
+
+class NotionHTTPError(RuntimeError):
+    def __init__(self, status, path):
+        self.status = status
+        super().__init__(f"Notion HTTP {status} at {path}")
+
+
+def live_resource(kind):
+    """Skip confirmed deletions, including deletion while reading a resource."""
+    def decorate(read):
+        @wraps(read)
+        def wrapped(self, oid, *args, **kwargs):
+            oid = uid(oid)
+            if oid in self.excluded:
+                return
+            try:
+                return read(self, oid, *args, **kwargs)
+            except NotionHTTPError as exc:
+                if exc.status != 404 or not self.deleted(kind, oid, refresh=True):
+                    raise
+                self.exclude(oid)
+        return wrapped
+    return decorate
+
+
 class API:
     def __init__(self, token, *, delay=None, attempts=5):
         if not token:
@@ -134,7 +163,7 @@ class API:
                 continue
             if not response.ok:
                 # Never log request headers, signed download URLs, or raw server bodies.
-                raise RuntimeError(f"Notion HTTP {response.status_code} at {path}")
+                raise NotionHTTPError(response.status_code, path)
             return response.json()
         raise RuntimeError("Notion request failed")
 
@@ -161,9 +190,48 @@ class Crawl:
         self.blocks = DiskMap(Path(spool_dir) / 'blocks') if spool_dir is not None else {}
         self.markdown = DiskMap(Path(spool_dir) / 'markdown') if spool_dir is not None else {}
         self.warnings = []
+        self.excluded = set()
+        self.metadata = {}
+
+    def exclude(self, oid):
+        if oid not in self.excluded:
+            log.info("Skipping resource in Notion Trash: %s", oid)
+        self.excluded.add(oid)
+        for store in (self.objects, self.rows, self.blocks, self.markdown):
+            if oid in store:
+                del store[oid]
+
+    def deleted(self, kind, oid, *, metadata=None, refresh=False, active=None):
+        """A 404 alone is not proof of deletion: permissions can cause it too."""
+        oid = uid(oid)
+        active = set() if active is None else active
+        if oid in active:
+            raise RuntimeError("Cyclic Notion resource parents")
+        if not refresh and oid in self.excluded:
+            return True
+        key = (kind, oid)
+        if metadata is not None:
+            obj = metadata
+        elif not refresh and key in self.metadata:
+            obj = self.metadata[key]
+        else:
+            endpoint = {"page": "pages", "database": "databases", "data_source": "data_sources"}[kind]
+            obj = self.api.request("GET", f"/{endpoint}/{oid}")
+        self.metadata[key] = obj
+        if trashed(obj):
+            self.exclude(oid)
+            return True
+        parent = obj.get("parent", {})
+        for parent_kind in ("page", "database", "data_source"):
+            parent_id = parent.get(parent_kind + "_id")
+            if parent_id and self.deleted(parent_kind, parent_id, refresh=refresh, active=active | {oid}):
+                self.exclude(oid)
+                return True
+        return False
 
     def blocks_for(self, oid):
         blocks = list(self.api.pages("GET", f"/blocks/{oid}/children"))
+        blocks = [block for block in blocks if not trashed(block)]
         for block in blocks:
             kind = block.get("type")
             if kind == "child_page":
@@ -203,11 +271,14 @@ class Crawl:
             else:
                 obj["properties"][name] = {**prop, kind: [x[kind] for x in results if kind in x], "has_more": False}
 
+    @live_resource("page")
     def page(self, oid, metadata=None):
         oid = uid(oid)
         if oid in self.objects:
             return
         obj = metadata if metadata is not None else self.api.request("GET", f"/pages/{oid}")
+        if self.deleted("page", oid, metadata=obj):
+            return
         self.objects[oid] = obj
         self.full_properties(obj)
         self.blocks[oid] = self.blocks_for(oid)
@@ -252,25 +323,34 @@ class Crawl:
             return text
         return retrieve(oid, set())
 
+    @live_resource("data_source")
     def source(self, oid):
         oid = uid(oid)
         if oid in self.objects:
             return
         obj = self.api.request("GET", f"/data_sources/{oid}")
+        if self.deleted("data_source", oid, metadata=obj):
+            return
         self.objects[oid] = obj
         self.rows[oid] = []
         for row in self.api.pages('POST', f'/data_sources/{oid}/query'):
+            if trashed(row):
+                self.exclude(uid(row['id']))
+                continue
             self.rows[oid].append({'id': row['id']})
             self.page(row['id'], row)
         parent = obj.get("database_parent", {}).get("database_id") or obj.get("parent", {}).get("database_id")
         if parent:
             self.database(parent)
 
+    @live_resource("database")
     def database(self, oid):
         oid = uid(oid)
         if oid in self.objects:
             return
         obj = self.api.request("GET", f"/databases/{oid}")
+        if self.deleted("database", oid, metadata=obj):
+            return
         self.objects[oid] = obj
         for source in obj.get("data_sources", []):
             self.source(source["id"])
@@ -283,13 +363,22 @@ class Crawl:
         # Search supplements traversal; it alone is not an exhaustive inventory.
         for kind in ("page", "data_source"):
             for obj in self.api.pages("POST", "/search", filter={"value": kind, "property": "object"}):
+                if trashed(obj):
+                    self.exclude(uid(obj["id"]))
+                    continue
                 if kind == "page":
                     self.page(obj["id"], obj)
                 else:
                     self.source(obj["id"])
         for kind, oid in roots:
             (self.database if kind == "database" else self.page)(oid)
-        if not self.objects:
+        # Remove descendants already visited before their parent was trashed.
+        for oid, obj in list(self.objects.items()):
+            if self.deleted(obj["object"], oid, metadata=obj):
+                self.exclude(oid)
+        for oid, rows in self.rows.items():
+            self.rows[oid] = [row for row in rows if uid(row["id"]) not in self.excluded]
+        if not self.objects and not self.excluded:
             raise RuntimeError("No accessible content; nothing published")
         return self
 
@@ -570,15 +659,33 @@ def snapshot(root, crawl, *, retention=1, downloader=None, max_file_bytes=536870
         previous_ids = set(previous_manifest.get("objects", {}))
         current_ids = set(crawl.objects)
         missing = sorted(previous_ids - current_ids)
-        if missing and os.environ.get("NOTION_ALLOW_MISSING", "0") != "1":
-            raise RuntimeError(f"{len(missing)} previously backed-up objects are missing (deletion or permissions); set NOTION_ALLOW_MISSING=1 only after review")
+        unexplained = []
+        previous_objects = previous_manifest.get("objects", {})
+        for oid in sorted(missing, key=lambda item: len(Path(previous_objects[item]["path"]).parts)):
+            old_path = Path(previous_objects[oid]["path"])
+            if any(parent in crawl.excluded and old_path.is_relative_to(Path(info["path"]))
+                   for parent, info in previous_objects.items()):
+                crawl.exclude(oid)
+            if oid in crawl.excluded:
+                continue
+            kind = previous_manifest["objects"][oid].get("type")
+            try:
+                deleted = crawl.api is not None and crawl.deleted(kind, oid, refresh=True)
+            except NotionHTTPError as exc:
+                if exc.status != 404:
+                    raise
+                deleted = False
+            if not deleted:
+                unexplained.append(oid)
+        if unexplained and os.environ.get("NOTION_ALLOW_MISSING", "0") != "1":
+            raise RuntimeError(f"{len(unexplained)} previously backed-up objects are missing without confirmed deletion (possibly lost permissions); set NOTION_ALLOW_MISSING=1 only after review")
         name = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S%fZ")
         manifest = {"timestamp": datetime.now(timezone.utc).isoformat(), "api_version": VERSION,
                     "status": "complete_with_warnings" if crawl.warnings else "complete",
                     "scope": "API-accessible content; search plus recursive traversal, not a native workspace export",
                     "objects": {oid: {"type": obj.get("object"), "path": str(paths[oid])} for oid, obj in crawl.objects.items()},
                     "files": files, "warnings": crawl.warnings, "unresolved_source_links": unresolved_links,
-                    "missing_since_previous": missing, "reused_files": reused,
+                    "missing_since_previous": missing, "confirmed_deleted": sorted(crawl.excluded), "reused_files": reused,
                     "external_media": "External embeds/links remain external; Notion-hosted file objects are downloaded"}
         (staging / "manifest.json").write_bytes(json_bytes(manifest))
         (staging / "COMPLETE").write_text(name + "\n")
