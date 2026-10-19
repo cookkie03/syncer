@@ -215,22 +215,30 @@ class Crawl:
         elif not refresh and key in self.metadata:
             obj = self.metadata[key]
         else:
-            endpoint = {"page": "pages", "database": "databases", "data_source": "data_sources"}[kind]
+            endpoint = {"page": "pages", "database": "databases", "data_source": "data_sources", "block": "blocks"}[kind]
             obj = self.api.request("GET", f"/{endpoint}/{oid}")
         self.metadata[key] = obj
         if trashed(obj):
             self.exclude(oid)
             return True
         parent = obj.get("parent", {})
-        for parent_kind in ("page", "database", "data_source"):
+        for parent_kind in ("block", "page", "database", "data_source"):
             parent_id = parent.get(parent_kind + "_id")
             if parent_id and self.deleted(parent_kind, parent_id, refresh=refresh, active=active | {oid}):
                 self.exclude(oid)
                 return True
         return False
 
-    def blocks_for(self, oid):
-        blocks = list(self.api.pages("GET", f"/blocks/{oid}/children"))
+    def blocks_for(self, oid, *, kind="block"):
+        try:
+            blocks = list(self.api.pages("GET", f"/blocks/{oid}/children"))
+        except NotionHTTPError as exc:
+            # The page decorator validates page 404s. Nested block 404s need
+            # fresh block metadata, including the ancestor chain, before skip.
+            if kind == "page" or exc.status != 404 or not self.deleted(kind, oid, refresh=True):
+                raise
+            self.exclude(oid)
+            return []
         blocks = [block for block in blocks if not trashed(block)]
         for block in blocks:
             kind = block.get("type")
@@ -281,7 +289,7 @@ class Crawl:
             return
         self.objects[oid] = obj
         self.full_properties(obj)
-        self.blocks[oid] = self.blocks_for(oid)
+        self.blocks[oid] = self.blocks_for(oid, kind="page")
         self.markdown[oid] = self.markdown_for(oid, self.blocks[oid])
         if "<unknown " in self.markdown[oid]:
             self.warnings.append(f"Markdown has unsupported blocks on {oid}; raw blocks retained")
