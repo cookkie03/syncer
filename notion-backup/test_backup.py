@@ -299,8 +299,10 @@ class APITests(unittest.TestCase):
                   'synced_block':{'synced_from':None,'children':[child]}}
         class Fake:
             def pages(self, method, path, **kwargs):
-                self.path=path
-                return [original]
+                if path == f'/blocks/{P}/children':
+                    self.path=path
+                    return [original]
+                raise b.NotionHTTPError(404,path)
             def request(self, method, path, **kwargs):
                 raise AssertionError(f'unexpected request {path}')
         fake=Fake()
@@ -315,7 +317,9 @@ class APITests(unittest.TestCase):
         original={'object':'block','id':D,'type':'synced_block','has_children':True,
                   'synced_block':{'synced_from':None,'children':[child]}}
         class Fake:
-            def pages(self, method, path, **kwargs): return [duplicate]
+            def pages(self, method, path, **kwargs):
+                if path == f'/blocks/{P}/children': return [duplicate]
+                raise b.NotionHTTPError(404,path)
             def request(self, method, path, **kwargs):
                 if path == f'/blocks/{D}': return original
                 raise AssertionError(f'unexpected request {path}')
