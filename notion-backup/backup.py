@@ -215,22 +215,33 @@ class Crawl:
         elif not refresh and key in self.metadata:
             obj = self.metadata[key]
         else:
-            endpoint = {"page": "pages", "database": "databases", "data_source": "data_sources"}[kind]
+            endpoint = {"page": "pages", "database": "databases", "data_source": "data_sources", "block": "blocks"}[kind]
             obj = self.api.request("GET", f"/{endpoint}/{oid}")
         self.metadata[key] = obj
         if trashed(obj):
             self.exclude(oid)
             return True
         parent = obj.get("parent", {})
-        for parent_kind in ("page", "database", "data_source"):
+        for parent_kind in ("block", "page", "database", "data_source"):
             parent_id = parent.get(parent_kind + "_id")
             if parent_id and self.deleted(parent_kind, parent_id, refresh=refresh, active=active | {oid}):
                 self.exclude(oid)
                 return True
         return False
 
-    def blocks_for(self, oid):
-        blocks = list(self.api.pages("GET", f"/blocks/{oid}/children"))
+    def blocks_for(self, oid, *, kind="block"):
+        try:
+            blocks = list(self.api.pages("GET", f"/blocks/{oid}/children"))
+        except NotionHTTPError as exc:
+            # The page decorator validates page 404s. Nested block 404s need
+            # fresh block metadata, including the ancestor chain, before skip.
+            if kind == "page" or exc.status != 404 or not self.deleted(kind, oid, refresh=True):
+                raise
+            self.exclude(oid)
+            return []
+        return self.prepare_blocks(blocks)
+
+    def prepare_blocks(self, blocks):
         blocks = [block for block in blocks if not trashed(block)]
         for block in blocks:
             kind = block.get("type")
@@ -238,11 +249,44 @@ class Crawl:
                 self.page(block["id"])
             elif kind == "child_database":
                 self.database(block["id"])
+            elif kind == "synced_block":
+                block["_children"] = self.synced_block_children(block)
             elif block.get("has_children"):
                 block["_children"] = self.blocks_for(block["id"])
             if kind == "unsupported":
                 self.warnings.append(f"Unsupported API block {block['id']}")
         return blocks
+
+    def synced_block_children(self, block):
+        """Read original synced-block children, including when this is a copy."""
+        current = block
+        origin_id = uid(block["id"])
+        active = set()
+        while True:
+            current_id = uid(current["id"])
+            if current_id in active:
+                raise RuntimeError("Cyclic Notion synced block references")
+            active.add(current_id)
+            value = current.get("synced_block")
+            if not isinstance(value, dict):
+                raise RuntimeError(f"Missing synced block data for {current_id}")
+            synced_from = value.get("synced_from")
+            if synced_from is None:
+                children = value.get("children")
+                if children is None:
+                    # Some API responses omit inline children; query the original.
+                    children = self.blocks_for(current_id)
+                return self.prepare_blocks(children)
+            source_id = synced_from.get("block_id")
+            if not source_id:
+                raise RuntimeError(f"Missing synced block source for {current_id}")
+            source_id = uid(source_id)
+            if source_id in active:
+                raise RuntimeError("Cyclic Notion synced block references")
+            current = self.api.request("GET", f"/blocks/{source_id}")
+            if self.deleted("block", source_id, metadata=current):
+                self.exclude(origin_id)
+                return []
 
     def full_properties(self, obj):
         for name, prop in list(obj.get("properties", {}).items()):
@@ -281,7 +325,7 @@ class Crawl:
             return
         self.objects[oid] = obj
         self.full_properties(obj)
-        self.blocks[oid] = self.blocks_for(oid)
+        self.blocks[oid] = self.blocks_for(oid, kind="page")
         self.markdown[oid] = self.markdown_for(oid, self.blocks[oid])
         if "<unknown " in self.markdown[oid]:
             self.warnings.append(f"Markdown has unsupported blocks on {oid}; raw blocks retained")
