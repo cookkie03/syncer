@@ -67,8 +67,8 @@ def save_token(path: pathlib.Path, serialized: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def calendar_token(credentials) -> str:
-    """Encode the OAuth2Session format consumed by vdirsyncer's Google storage."""
+def calendar_token(credentials, client: dict[str, str] | None = None) -> str:
+    """Encode the OAuth2Session format consumed by vdirsyncer and Google backup services."""
     if not credentials.token or not credentials.refresh_token:
         raise RuntimeError("Google returned no access or refresh token")
     expiry = credentials.expiry
@@ -76,15 +76,20 @@ def calendar_token(credentials) -> str:
         raise RuntimeError("Google returned no token expiry")
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
+    scopes = credentials.scopes or [SERVICES[0][2], SERVICES[1][2]]
     payload = {
+        "token": credentials.token,
         "access_token": credentials.token,
         "refresh_token": credentials.refresh_token,
         "token_type": "Bearer",
+        "token_uri": "https://oauth2.googleapis.com/token",
         "expires_at": expiry.timestamp(),
-        "scope": " ".join(credentials.scopes or [SERVICES[0][2]]),
+        "scope": " ".join(scopes),
         "client_id": credentials.client_id,
     }
-    return json.dumps(payload)
+    if client and client.get("client_secret"):
+        payload["client_secret"] = client["client_secret"]
+    return json.dumps(payload, indent=2)
 
 
 def token_has_required_fields(path: pathlib.Path, filename: str, client: dict[str, str]) -> bool:
@@ -123,67 +128,85 @@ def main() -> int:
     except ImportError as exc:
         raise RuntimeError("Install google-auth-oauthlib in the Python environment used for this command") from exc
 
-    failures = 0
-    for name, filename, scope in SERVICES if args.include_gmail else SERVICES[:2]:
-        destination = TOKEN_DIR / filename
-        if destination.exists() and not args.force:
-            if not token_has_required_fields(destination, filename, client):
-                print(f"{name}: existing token is incompatible with the current client; requesting new consent")
-            else:
-                print(f"{name}: existing token retained at {destination}")
-                continue
+    unified_scopes = [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/contacts",
+    ]
+    if args.include_gmail:
+        unified_scopes.append("https://www.googleapis.com/auth/gmail.readonly")
+
+    destination = TOKEN_DIR / "google.json"
+    marker = destination.with_name("google-client-id")
+    contacts_dest = TOKEN_DIR / "google_contacts.json"
+
+    needs_auth = True
+    if destination.exists() and not args.force:
         try:
-            flow = InstalledAppFlow.from_client_secrets_file(str(source), scopes=[scope])
-            credentials = None
-            if not args.no_browser:
-                try:
-                    credentials = flow.run_local_server(
-                        host="127.0.0.1",
-                        port=args.port,
-                        open_browser=True,
-                        access_type="offline",
-                        prompt="consent",
-                    )
-                except Exception as exc:
-                    err_msg = str(exc).lower()
-                    if "browser" in err_msg or "display" in err_msg or "x11" in err_msg:
-                        print(f"[{name}] No local browser detected. Switching to two-step manual flow...")
-                        credentials = None
-                    else:
-                        raise
+            payload = json.loads(destination.read_text(encoding="utf-8"))
+            saved_id = marker.read_text(encoding="utf-8").strip() if marker.is_file() else None
+            has_cal = token_matches_client(payload, client, ("access_token", "refresh_token"), unified_scopes[0], saved_id)
+            has_con = token_matches_client(payload, client, ("access_token", "refresh_token"), unified_scopes[1], saved_id)
+            if has_cal and has_con:
+                print(f"Google: existing unified token retained at {destination}")
+                needs_auth = False
+        except Exception:
+            needs_auth = True
 
-            if credentials is None:
-                os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-                flow = InstalledAppFlow.from_client_secrets_file(str(source), scopes=[scope])
-                flow.redirect_uri = f"http://127.0.0.1:{args.port}/"
-                auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
-                print("\n" + "=" * 60)
-                print(f"[{name}] STEP 1: Open this URL in any browser (PC, phone, etc.):")
-                print(auth_url)
-                print("=" * 60)
-                print(f"[{name}] STEP 2: Log in and allow access on Google.")
-                print(f"The browser will redirect to http://127.0.0.1:{args.port}/?code=... (showing an error page; this is normal).")
-                print("Copy the ENTIRE URL from your browser address bar (or just the code value) and paste it below:")
-                print("=" * 60)
-                user_input = input(f"[{name}] Paste redirect URL or code here: ").strip()
-                code = extract_code(user_input)
-                flow.fetch_token(code=code)
-                credentials = flow.credentials
+    if not needs_auth:
+        return 0
 
-            if not credentials.refresh_token:
-                raise RuntimeError("Google returned no refresh token; token was not saved")
-            serialized = calendar_token(credentials) if filename == "google.json" else credentials.to_json()
-            save_token(destination, serialized)
-            if filename == "google.json":
-                marker = destination.with_name("google-client-id")
-                marker.write_text(client["client_id"], encoding="utf-8")
-                marker.chmod(0o600)
-            print(f"{name}: token saved at {destination}")
-        except Exception as exc:
-            failures += 1
-            print(f"{name}: authorization failed: {exc}", file=sys.stderr)
+    name = "Google (Calendar & Contacts)"
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(str(source), scopes=unified_scopes)
+        credentials = None
+        if not args.no_browser:
+            try:
+                credentials = flow.run_local_server(
+                    host="127.0.0.1",
+                    port=args.port,
+                    open_browser=True,
+                    access_type="offline",
+                    prompt="consent",
+                )
+            except Exception as exc:
+                err_msg = str(exc).lower()
+                if "browser" in err_msg or "display" in err_msg or "x11" in err_msg:
+                    print(f"[{name}] No local browser detected. Switching to two-step manual flow...")
+                    credentials = None
+                else:
+                    raise
 
-    return 1 if failures else 0
+        if credentials is None:
+            os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+            flow = InstalledAppFlow.from_client_secrets_file(str(source), scopes=unified_scopes)
+            flow.redirect_uri = f"http://127.0.0.1:{args.port}/"
+            auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+            print("\n" + "=" * 60)
+            print(f"[{name}] STEP 1: Open this URL in any browser (PC, phone, etc.):")
+            print(auth_url)
+            print("=" * 60)
+            print(f"[{name}] STEP 2: Log in and allow access on Google (Calendar + Contacts).")
+            print(f"The browser will redirect to http://127.0.0.1:{args.port}/?code=... (showing an error page; this is normal).")
+            print("Copy the ENTIRE URL from your browser address bar (or just the code value) and paste it below:")
+            print("=" * 60)
+            user_input = input(f"[{name}] Paste redirect URL or code here: ").strip()
+            code = extract_code(user_input)
+            flow.fetch_token(code=code)
+            credentials = flow.credentials
+
+        if not credentials.refresh_token:
+            raise RuntimeError("Google returned no refresh token; token was not saved")
+        serialized = calendar_token(credentials, client)
+        save_token(destination, serialized)
+        marker.write_text(client["client_id"], encoding="utf-8")
+        marker.chmod(0o600)
+        save_token(contacts_dest, serialized)
+        print(f"Google: unified token saved at {destination} (and mirrored to {contacts_dest})")
+    except Exception as exc:
+        print(f"{name}: authorization failed: {exc}", file=sys.stderr)
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":

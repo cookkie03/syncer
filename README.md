@@ -112,7 +112,7 @@ Le directory vengono create quando servono. I servizi di sola sincronizzazione n
 | --- | --- | --- | --- |
 | CalDAV (disattivato) | `caldav-backup/backup/current/`: ICS e `manifest.json` | Nessuno separato | `caldav-backup/logs/` |
 | Google Calendar | `google-calendar-backup/backup/current/`: calendari ICS e `manifest.json` | `settings/auth/google/google.json` | `google-calendar-backup/logs/` |
-| Google Contacts | `google-contacts-backup/backup/current/`: `contacts/*.vcf`, `all_contacts.vcf`, `manifest.json` | `settings/auth/google/google_contacts.json` | `google-contacts-backup/logs/` |
+| Google Contacts | `google-contacts-backup/backup/current/`: `contacts/*.vcf`, `all_contacts.vcf`, `manifest.json` | `settings/auth/google/google.json` | `google-contacts-backup/logs/` |
 | Spotify | `spotify-backup/backup/current/spotify_backup_current.json` | `settings/auth/spotify/.cache` contiene OAuth; `playlist_track_cache.json` conserva i brani già ottenuti | `spotify-backup/logs/` |
 | Todoist | `todoist-backup/backup/current/`: SQLite, JSON, CSV e checksum; oggetti condivisi in `backup/objects/` | `settings/auth/todoist/token`; `todoist-backup/state/`: SQLite e checkpoint | `todoist-backup/logs/` |
 | vdirsyncer | Non produce un backup | `vdirsyncer/state/config/`, `state/status/`, `settings/auth/google/` | `vdirsyncer/logs/` |
@@ -121,7 +121,7 @@ Le directory vengono create quando servono. I servizi di sola sincronizzazione n
 | VTODO–Notion, disattivato | Non produce un backup | `vtodo-notion/state/` | `vtodo-notion/logs/` |
 
 I token e le autorizzazioni sono centralizzati nella cartella **`settings/auth/`**:
-- **`settings/auth/google/`**: `google.json` (Calendar e vdirsyncer), `google_contacts.json` (Contacts), `client_secret.json`.
+- **`settings/auth/google/`**: `google.json` (token unico unificato per Calendar, Contacts e vdirsyncer), `client_secret.json`.
 - **`settings/auth/spotify/`**: `.cache` (token OAuth PKCE per Spotify).
 - **`settings/auth/todoist/`**: `token` (API token personale per Todoist).
 

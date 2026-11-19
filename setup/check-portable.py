@@ -93,9 +93,13 @@ def check(config_only: bool = False, include_gmail: bool = False) -> list[str]:
             if alt.exists() and any(alt.glob("*.json")):
                 token_dir = alt
                 break
+    google_file = token_dir / "google.json"
+    contacts_file = token_dir / "google_contacts.json"
+    contacts_target = "google.json" if not contacts_file.is_file() and google_file.is_file() else "google_contacts.json"
+
     token_specs = [
         ("google.json", ("access_token", "refresh_token"), "https://www.googleapis.com/auth/calendar"),
-        ("google_contacts.json", ("token", "refresh_token"), "https://www.googleapis.com/auth/contacts"),
+        (contacts_target, ("access_token", "refresh_token") if contacts_target == "google.json" else ("token", "refresh_token"), "https://www.googleapis.com/auth/contacts"),
     ]
     if include_gmail:
         token_specs.append(("google_gmail.json", ("token", "refresh_token"), "https://www.googleapis.com/auth/gmail.readonly"))

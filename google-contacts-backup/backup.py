@@ -264,14 +264,30 @@ class GoogleContactsClient:
         from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
 
-        token_file = require_env("GOOGLE_CONTACTS_TOKEN_FILE")
+        token_file = os.environ.get("GOOGLE_CONTACTS_TOKEN_FILE", "").strip()
+        if not token_file or not Path(token_file).is_file():
+            for candidate in ("/data/token/google.json", "/data/token/google_contacts.json"):
+                if Path(candidate).is_file():
+                    token_file = candidate
+                    break
+        if not token_file or not Path(token_file).is_file():
+            raise RuntimeError(f"Google token file not found: {token_file or '/data/token/google.json'}")
         token_payload = load_google_token_payload(token_file)
         client_path = Path(require_env("GOOGLE_CLIENT_JSON_FILE"))
         client = load_google_client(client_path)
-        if not token_matches_client(token_payload, client, ("token", "refresh_token"), GOOGLE_CONTACTS_SCOPE):
-            raise RuntimeError("Google Contacts token does not match setup/google/client_secret.json")
+        fields = ("access_token", "refresh_token") if "access_token" in token_payload else ("token", "refresh_token")
+        saved_client_id = None
+        marker_file = Path(token_file).parent / "google-client-id"
+        if marker_file.is_file():
+            saved_client_id = marker_file.read_text(encoding="utf-8").strip()
+        if not token_matches_client(token_payload, client, fields, GOOGLE_CONTACTS_SCOPE, saved_client_id):
+            raise RuntimeError("Google Contacts token does not match configured client secret and scope")
         scopes = google_contacts_scopes_from_token_payload(token_payload)
-        credentials = Credentials.from_authorized_user_info({**token_payload, **client}, scopes)
+        credentials = Credentials.from_authorized_user_info({
+            **token_payload,
+            "token": token_payload.get("access_token") or token_payload.get("token"),
+            **client,
+        }, scopes)
         if not credentials.valid and credentials.refresh_token:
             credentials.refresh(Request())
         log.info("Using Google Contacts token scopes: %s", " ".join(scopes))

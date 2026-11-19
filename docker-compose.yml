@@ -233,7 +233,7 @@ services:
       - LOG_DIR=/logs
       - BACKUP_DIR=/backup
       - GOOGLE_CONTACTS_SNAPSHOT_RETENTION=${GOOGLE_CONTACTS_SNAPSHOT_RETENTION:-14}
-      - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google_contacts.json
+      - GOOGLE_CONTACTS_TOKEN_FILE=/data/token/google.json
       - GOOGLE_CLIENT_JSON_FILE=/run/syncer-google-client/client_secret.json
     healthcheck:
       test: ["CMD", "python3", "-c", "import googleapiclient, vobject; print('ok')"]
