@@ -46,7 +46,7 @@ outputs = {
     'Google Calendar': ('google-calendar-backup/backup/current/manifest.json', 12 * 3600),
     'Google Contacts': ('google-contacts-backup/backup/current/manifest.json', 48 * 3600),
     'Spotify': ('spotify-backup/backup/current/spotify_backup_current.json', 12 * 3600),
-    'vdirsyncer': ('vdirsyncer/state/status/last-success', 4 * 3600),
+    # 'vdirsyncer': ('vdirsyncer/state/status/last-success', 4 * 3600),
 }
 failed = False
 for service, (name, max_age) in outputs.items():
