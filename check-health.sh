@@ -62,6 +62,23 @@ for service, (name, max_age) in outputs.items():
     else:
         print(f'OK: {service}: ultimo risultato {age / 3600:.1f} ore fa')
 
+log_files = {
+    'Google Calendar': ('google-calendar-backup/logs/google-calendar-backup.log', 24 * 3600),
+    'Google Contacts': ('google-contacts-backup/logs/google-contacts-backup.log', 48 * 3600),
+    'Spotify': ('spotify-backup/logs/spotify-backup.log', 24 * 3600),
+    'vdirsyncer': ('vdirsyncer/logs/vdirsyncer.log', 4 * 3600),
+}
+for service, (log_name, max_log_age) in log_files.items():
+    p = Path(log_name)
+    if not p.is_file():
+        print(f'WARN: {service}: log assente: {log_name}')
+        continue
+    log_age = time() - p.stat().st_mtime
+    if log_age > max_log_age:
+        print(f'WARN: {service}: log non aggiornato ({log_age / 3600:.1f} ore fa)')
+    else:
+        print(f'OK: {service}: log aggiornato {log_age / 3600:.1f} ore fa')
+
 spotify_current = Path('spotify-backup/backup/current/spotify_backup_current.json')
 if spotify_current.is_file():
     try:
