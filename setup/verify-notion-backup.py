@@ -9,6 +9,14 @@ from pathlib import Path
 from urllib.parse import unquote
 
 
+def is_within(path, root):
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def verify(backup_root):
     current = (backup_root / 'current').resolve(strict=True)
     if not (current / 'COMPLETE').is_file():
@@ -31,11 +39,11 @@ def verify(backup_root):
         if re.match(r'^\[*[A-Za-z][A-Za-z0-9+.-]*:', url) or url.startswith(('#', '//')):
             return
         target = (base / unquote(url.split('#', 1)[0])).resolve()
-        if not target.is_relative_to(current) or not target.is_file():
+        if not is_within(target, current) or not target.is_file():
             raise RuntimeError('Broken or out-of-snapshot local reference')
     for name, entry in manifest['files'].items():
         path = (current / name).resolve()
-        if not path.is_relative_to(current) or not path.is_file():
+        if not is_within(path, current) or not path.is_file():
             raise RuntimeError('Missing or unsafe manifest file')
         digest = hashlib.sha256()
         with path.open('rb') as stream:

@@ -293,6 +293,75 @@ class APITests(unittest.TestCase):
         obj['properties']['Name']['title']=[{'plain_text':'x'}]*25
         b.Crawl(api).full_properties(obj)
         self.assertEqual(b.title(obj),'OneTwo')
+    def test_original_synced_block_uses_embedded_children(self):
+        child={'object':'block','id':D,'type':'paragraph','has_children':False}
+        original={'object':'block','id':C,'type':'synced_block','has_children':True,
+                  'synced_block':{'synced_from':None,'children':[child]}}
+        class Fake:
+            def pages(self, method, path, **kwargs):
+                if path == f'/blocks/{P}/children':
+                    self.path=path
+                    return [original]
+                raise b.NotionHTTPError(404,path)
+            def request(self, method, path, **kwargs):
+                raise AssertionError(f'unexpected request {path}')
+        fake=Fake()
+        blocks=b.Crawl(fake).blocks_for(P,kind='page')
+        self.assertEqual(fake.path,f'/blocks/{P}/children')
+        self.assertEqual(blocks[0]['_children'],[child])
+
+    def test_duplicate_synced_block_reads_original_embedded_children(self):
+        child={'object':'block','id':S,'type':'paragraph','has_children':False}
+        duplicate={'object':'block','id':C,'type':'synced_block','has_children':True,
+                   'synced_block':{'synced_from':{'type':'block_id','block_id':D}}}
+        original={'object':'block','id':D,'type':'synced_block','has_children':True,
+                  'synced_block':{'synced_from':None,'children':[child]}}
+        class Fake:
+            def pages(self, method, path, **kwargs):
+                if path == f'/blocks/{P}/children': return [duplicate]
+                raise b.NotionHTTPError(404,path)
+            def request(self, method, path, **kwargs):
+                if path == f'/blocks/{D}': return original
+                raise AssertionError(f'unexpected request {path}')
+        blocks=b.Crawl(Fake()).blocks_for(P,kind='page')
+        self.assertEqual(blocks[0]['_children'],[child])
+
+    def test_block_children_404_requires_fresh_metadata(self):
+        class Fake:
+            def __init__(self, block, parent=None):
+                self.block=block; self.parent=parent
+            def pages(self, method, path, **kwargs):
+                raise b.NotionHTTPError(404,path)
+            def request(self, method, path, **kwargs):
+                if path == f'/blocks/{C}': return self.block
+                if path == f'/pages/{P}': return self.parent
+                raise AssertionError(path)
+
+        active_page=page(P,'Parent')
+        trashed_block={'object':'block','id':C,'archived':True,'parent':{'type':'page_id','page_id':P}}
+        crawl=b.Crawl(Fake(trashed_block,active_page))
+        self.assertEqual(crawl.blocks_for(C),[])
+        self.assertIn(C,crawl.excluded)
+
+        active_block={'object':'block','id':C,'archived':False,'parent':{'type':'page_id','page_id':P}}
+        crawl=b.Crawl(Fake(active_block,active_page))
+        with self.assertRaisesRegex(b.NotionHTTPError,'404'):
+            crawl.blocks_for(C)
+        self.assertNotIn(C,crawl.excluded)
+
+    def test_block_children_404_respects_archived_parent_from_fresh_metadata(self):
+        active_block={'object':'block','id':C,'archived':False,'parent':{'type':'page_id','page_id':P}}
+        archived_page={**page(P,'Parent'),'archived':True}
+        class Fake:
+            def pages(self, method, path, **kwargs): raise b.NotionHTTPError(404,path)
+            def request(self, method, path, **kwargs):
+                if path == f'/blocks/{C}': return active_block
+                if path == f'/pages/{P}': return archived_page
+                raise AssertionError(path)
+        crawl=b.Crawl(Fake())
+        self.assertEqual(crawl.blocks_for(C),[])
+        self.assertIn(C,crawl.excluded)
+
     def test_crawl_traverses_database_and_rows_not_just_search(self):
         class Fake:
             def request(self,method,path,**kwargs):
