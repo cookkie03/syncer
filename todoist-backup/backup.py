@@ -56,7 +56,21 @@ def main(argv=None):
         if args.command == "backup":
             token = os.getenv("TODOIST_API_TOKEN", "").strip()
             if not token or token == "YOUR_VALUE_HERE" or token.startswith("${"):
-                print("ERROR: TODOIST_API_TOKEN is required; configure .env locally", file=sys.stderr)
+                candidate_files = [
+                    os.getenv("TODOIST_TOKEN_FILE", ""),
+                    "/auth/todoist/token",
+                    str(Path(__file__).resolve().parent.parent / "auth" / "todoist" / "token"),
+                ]
+                for candidate in candidate_files:
+                    if candidate and Path(candidate).is_file():
+                        try:
+                            token = Path(candidate).read_text(encoding="utf-8").strip()
+                            if token:
+                                break
+                        except OSError:
+                            pass
+            if not token or token == "YOUR_VALUE_HERE" or token.startswith("${"):
+                print("ERROR: TODOIST_API_TOKEN or auth/todoist/token is required", file=sys.stderr)
                 return 1
             with exclusive_lock(args.state_dir):
                 migrate(args.legacy_dir, args.state_dir, args.backup_dir)

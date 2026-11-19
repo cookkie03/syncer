@@ -1,4 +1,10 @@
 # Credenziali e autorizzazioni locali
+settings/auth/google/*
+!settings/auth/google/.gitkeep
+settings/auth/spotify/*
+!settings/auth/spotify/.gitkeep
+settings/auth/todoist/*
+!settings/auth/todoist/.gitkeep
 .env
 .env.*
 !.env.example
@@ -68,6 +74,8 @@ Thumbs.db
 *~
 
 # File locali o precedenti al flusso Compose
+.agents/
+skills-lock.json
 .worktrees/
 .claude/
 .claude

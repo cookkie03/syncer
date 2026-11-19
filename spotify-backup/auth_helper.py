@@ -24,6 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'setup'))
 from project_env import load_project_env
 
 PROJECT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = PROJECT_DIR.parent
+AUTH_DIR = ROOT_DIR / 'settings' / 'auth' / 'spotify'
 STATE_DIR = PROJECT_DIR / 'state'
 
 
@@ -61,8 +63,15 @@ def default_cache_path() -> Path:
 
 
 def resolved_cache_path() -> Path:
-    """Allow overrides while defaulting to the repo-local cache path."""
-    return Path(os.environ.get('SPOTIFY_CACHE_PATH', default_cache_path()))
+    """Allow overrides while defaulting to settings/auth/spotify or repo-local cache path."""
+    if 'SPOTIFY_CACHE_PATH' in os.environ:
+        return Path(os.environ['SPOTIFY_CACHE_PATH'])
+    auth_cache = AUTH_DIR / '.cache'
+    legacy_cache = default_cache_path()
+    if legacy_cache.exists() and not auth_cache.exists():
+        return legacy_cache
+    AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    return auth_cache
 
 
 def should_open_browser() -> bool:
@@ -258,6 +267,47 @@ def main():
     auth_url = 'https://accounts.spotify.com/authorize?' + urlencode(auth_params)
 
     listen_port = int(os.environ.get('SPOTIFY_AUTH_PORT', parsed.port or 9000))
+    CallbackHandler.redirect_uri = redirect_uri
+
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manual", "--no-browser", dest="manual", action="store_true",
+                        help="Two-step manual flow for headless machines without a browser")
+    args, _ = parser.parse_known_args()
+
+    use_manual = args.manual or not should_open_browser()
+    if use_manual:
+        print("\n" + "=" * 60)
+        print("STEP 1: Open this URL in any browser (PC, phone, etc.):")
+        print(auth_url)
+        print("=" * 60)
+        print("IMPORTANT - Spotify Developer Dashboard:")
+        print("In your Spotify App settings (Settings -> Redirect URIs),")
+        print("make sure this EXACT URI is registered:")
+        print(f"  {redirect_uri}")
+        print("(Note: Spotify requires 'http://', not 'https://' for localhost/127.0.0.1)")
+        print("=" * 60)
+        print("STEP 2: Log in and click 'Agree'.")
+        print(f"The browser will redirect to a URL starting with {redirect_uri}?code=...")
+        print("(The browser will show 'unable to connect' or similar; this is normal!)")
+        print("Copy the ENTIRE URL from your browser address bar and paste it below.")
+        print("=" * 60)
+        user_input = input("Paste the redirect URL or code here: ").strip()
+        if "accounts.spotify.com/authorize" in user_input:
+            print("\nError: You pasted the authorization URL instead of the redirect URL.")
+            print(f"After authorizing in Spotify, copy the address starting with '{redirect_uri}?code=...'")
+            sys.exit(1)
+        params = extract_callback_params(user_input)
+        code = params.get('code') or (user_input if not user_input.startswith(('http://', 'https://')) else None)
+        if not code:
+            print("\nError: No authorization code found in the pasted URL.")
+            sys.exit(1)
+        if not handle_callback_result(code, params.get('error'), code_verifier, redirect_uri):
+            sys.exit(1)
+        print("\nAuth complete!")
+        print(f"Token location: {resolved_cache_path()}")
+        return
+
     server = HTTPServer(('localhost', listen_port), CallbackHandler)
     if is_https and is_localhost:
         cert = PROJECT_DIR / 'cert.pem'
@@ -268,7 +318,6 @@ def main():
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile=str(cert), keyfile=str(key))
         server.socket = context.wrap_socket(server.socket, server_side=True)
-    CallbackHandler.redirect_uri = redirect_uri
 
     print("Open this URL in a browser on the PC:")
     print(auth_url)

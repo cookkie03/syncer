@@ -1,13 +1,19 @@
+x-limits: &default-limits
+  mem_limit: "${SYNCER_MEMORY_LIMIT:-512m}"
+  memswap_limit: "${SYNCER_MEMSWAP_LIMIT:-1g}"
+
 services:
 
   # Todoist: read-only incremental account backup, prepared on the PC.
   todoist-backup:
+    <<: *default-limits
     build:
       context: ./todoist-backup
     image: caldav-sync/todoist-backup:local
     restart: unless-stopped
     environment:
       - TODOIST_API_TOKEN=${TODOIST_API_TOKEN:-}
+      - TODOIST_TOKEN_FILE=/auth/todoist/token
       - TODOIST_BACKUP_SCHEDULE=${TODOIST_BACKUP_SCHEDULE:-0 */4 * * *}
       - TODOIST_MAX_REQUESTS=${TODOIST_MAX_REQUESTS:-600}
       - TODOIST_MAX_RUN_SECONDS=${TODOIST_MAX_RUN_SECONDS:-1800}
@@ -22,6 +28,7 @@ services:
       - ./todoist-backup/backup:/backup
       - ./todoist-backup/data:/legacy-data:ro
       - ./todoist-backup/logs:/logs
+      - ./settings/auth/todoist:/auth/todoist:ro
     healthcheck:
       test: ["CMD", "python", "/app/backup.py", "status", "--health"]
       interval: 5m
@@ -31,6 +38,7 @@ services:
 
   # ── spotify-backup: headless Spotify mirror backup ────────────────────────
   spotify-backup:
+    <<: *default-limits
     build:
       context: ./spotify-backup
     image: caldav-sync/spotify-backup:local
@@ -41,9 +49,10 @@ services:
       - ./spotify-backup/state:/state
       - ./backup_storage.py:/app/backup_storage.py:ro
       - ./spotify-backup/logs:/logs
+      - ./settings/auth/spotify:/auth/spotify
     environment:
       - BACKUP_DIR=/backup
-      - CACHE_PATH=/state/.cache
+      - CACHE_PATH=/auth/spotify/.cache
       - STATE_DIR=/state
       - SPOTIFY_SNAPSHOT_RETENTION=${SPOTIFY_SNAPSHOT_RETENTION:-14}
       - LOG_DIR=/logs
@@ -56,6 +65,7 @@ services:
 
   # ── vdirsyncer: CalDAV → Google Calendar ──────────────────────────────────
   vdirsyncer:
+    <<: *default-limits
     build:
       context: ./vdirsyncer
     image: caldav-sync/vdirsyncer:local
@@ -67,7 +77,7 @@ services:
     volumes:
       - ./vdirsyncer/state/config:/data/vdirsyncer
       - ./vdirsyncer/state/status:/data/status
-      - ./vdirsyncer/state/token:/data/token
+      - ./settings/auth/google:/data/token
       - ./vdirsyncer/logs:/logs
       - ./settings:/app/project-settings
       - ./setup/google:/run/syncer-google-client:ro
@@ -84,6 +94,37 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── google-calendar-backup: direct Google Calendar → ICS snapshots ────────
+  google-calendar-backup:
+    <<: *default-limits
+    build:
+      context: ./google-calendar-backup
+    image: caldav-sync/google-calendar-backup:local
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./google-calendar-backup/backup:/backup
+      - ./google-calendar-backup/logs:/logs
+      - ./backup_storage.py:/app/backup_storage.py:ro
+      - ./settings/auth/google:/data/token:ro
+      - ./settings:/app/project-settings:ro
+      - ./setup/google:/run/syncer-google-client:ro
+    environment:
+      - LOG_DIR=/logs
+      - GOOGLE_CALENDAR_BACKUP_DIR=/backup
+      - GOOGLE_CALENDAR_SNAPSHOT_RETENTION=${GOOGLE_CALENDAR_SNAPSHOT_RETENTION:-14}
+      - GOOGLE_CALENDAR_BACKUP_INTERVAL_SECONDS=${GOOGLE_CALENDAR_BACKUP_INTERVAL_SECONDS:-14400}
+      - GOOGLE_CALENDAR_BACKUP_ATTEMPTS=${GOOGLE_CALENDAR_BACKUP_ATTEMPTS:-3}
+      - GOOGLE_CALENDAR_BACKUP_MAX_AGE=${GOOGLE_CALENDAR_BACKUP_MAX_AGE:-43200}
+      - GOOGLE_CALENDAR_TOKEN_FILE=/data/token/google.json
+      - GOOGLE_CLIENT_JSON_FILE=/run/syncer-google-client/client_secret.json
+    healthcheck:
+      test: ["CMD", "python3", "/app/backup.py", "--health"]
+      interval: 5m
+      timeout: 30s
+      retries: 3
+      start_period: 10m
 
   # ── vtodo-notion: temporarily disabled ────────────────────────────────────
   # vtodo-notion:
@@ -145,36 +186,37 @@ services:
       retries: 3
       start_period: 180m
 
-  # ── caldav-backup: backup CalDAV calendars and tasks to ICS ───────────────
-  caldav-backup:
-    build:
-      context: ./caldav-backup
-    image: caldav-sync/caldav-backup:local
-    restart: unless-stopped
-    env_file: .env
-    # CalDAV is hosted on this NAS: use its network, as verified by the backup.
-    network_mode: "${CALDAV_BACKUP_NETWORK_MODE:-host}"
-    volumes:
-      - ./caldav-backup/backup:/backup
-      - ./backup_storage.py:/app/backup_storage.py:ro
-      - ./caldav-backup/logs:/logs
-    environment:
-      - CALDAV_BACKUP_DIR=/backup
-      - CALDAV_BACKUP_RETENTION=${CALDAV_BACKUP_RETENTION:-180}
-      - CALDAV_BACKUP_TIMEOUT=${CALDAV_BACKUP_TIMEOUT:-60}
-      - CALDAV_BACKUP_ATTEMPTS=${CALDAV_BACKUP_ATTEMPTS:-5}
-      - CALDAV_BACKUP_MAX_AGE=${CALDAV_BACKUP_MAX_AGE:-43200}
-      - LOG_DIR=/logs
-    command: ["--watch", "--interval", "${CALDAV_BACKUP_INTERVAL_SECONDS:-14400}"]
-    healthcheck:
-      test: ["CMD", "python", "/app/backup.py", "--health"]
-      interval: 5m
-      timeout: 60s
-      retries: 3
-      start_period: 10m
+  # ── caldav-backup: temporarily shelved ────────────────────────────────────
+  # caldav-backup:
+  #   <<: *default-limits
+  #   build:
+  #     context: ./caldav-backup
+  #   image: caldav-sync/caldav-backup:local
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   network_mode: "${CALDAV_BACKUP_NETWORK_MODE:-host}"
+  #   volumes:
+  #     - ./caldav-backup/backup:/backup
+  #     - ./backup_storage.py:/app/backup_storage.py:ro
+  #     - ./caldav-backup/logs:/logs
+  #   environment:
+  #     - CALDAV_BACKUP_DIR=/backup
+  #     - CALDAV_BACKUP_RETENTION=${CALDAV_BACKUP_RETENTION:-180}
+  #     - CALDAV_BACKUP_TIMEOUT=${CALDAV_BACKUP_TIMEOUT:-60}
+  #     - CALDAV_BACKUP_ATTEMPTS=${CALDAV_BACKUP_ATTEMPTS:-5}
+  #     - CALDAV_BACKUP_MAX_AGE=${CALDAV_BACKUP_MAX_AGE:-43200}
+  #     - LOG_DIR=/logs
+  #   command: ["--watch", "--interval", "${CALDAV_BACKUP_INTERVAL_SECONDS:-14400}"]
+  #   healthcheck:
+  #     test: ["CMD", "python", "/app/backup.py", "--health"]
+  #     interval: 5m
+  #     timeout: 60s
+  #     retries: 3
+  #     start_period: 10m
 
   # ── google-contacts-backup: Incremental Google Contacts Backup ────────────
   google-contacts-backup:
+    <<: *default-limits
     build:
       context: ./google-contacts-backup
     image: caldav-sync/google-contacts-backup:local
@@ -184,7 +226,7 @@ services:
       - ./google-contacts-backup/backup:/backup
       - ./backup_storage.py:/app/backup_storage.py:ro
       - ./google-contacts-backup/logs:/logs
-      - ./vdirsyncer/state/token:/data/token:ro
+      - ./settings/auth/google:/data/token:ro
       - ./settings:/app/project-settings:ro
       - ./setup/google:/run/syncer-google-client:ro
     environment:
@@ -199,3 +241,29 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── github-backup: owned and starred repository mirrors ───────────────────
+  # github-backup:
+  #   build:
+  #     context: ./github-backup
+  #   image: caldav-sync/github-backup:local
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   volumes:
+  #     - ./github-backup/backup:/backup
+  #     - ./github-backup/state:/state
+  #     - ./github-backup/logs:/logs
+  #   environment:
+  #     - BACKUP_DIR=/backup
+  #     - STATE_DIR=/state
+  #     - LOG_DIR=/logs
+  #     - GITHUB_BACKUP_SCHEDULE=${GITHUB_BACKUP_SCHEDULE:-@daily}
+  #     - GITHUB_API_URL=${GITHUB_API_URL:-https://api.github.com}
+  #     - GITHUB_MAX_DELETION_RATIO=${GITHUB_MAX_DELETION_RATIO:-0.5}
+  #     - GITHUB_REMOVE_STALE=${GITHUB_REMOVE_STALE:-0}
+  #   healthcheck:
+  #     test: ["CMD", "python", "/app/backup.py", "--health"]
+  #     interval: 5m
+  #     timeout: 30s
+  #     retries: 3
+  #     start_period: 10m

@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-expected="caldav-backup google-contacts-backup spotify-backup todoist-backup vdirsyncer"
+expected="google-calendar-backup google-contacts-backup spotify-backup todoist-backup vdirsyncer"
 if [[ ",${COMPOSE_PROFILES:-}," == *,notion,* ]]; then
   expected="$expected notion-backup"
 fi
@@ -41,7 +41,9 @@ from pathlib import Path
 from time import time
 
 outputs = {
-    'CalDAV': ('caldav-backup/backup/current/manifest.json', 12 * 3600),
+    # 'CalDAV': ('caldav-backup/backup/current/manifest.json', 12 * 3600),
+    # 'GitHub': ('github-backup/state/status.json', 48 * 3600),
+    'Google Calendar': ('google-calendar-backup/backup/current/manifest.json', 12 * 3600),
     'Google Contacts': ('google-contacts-backup/backup/current/manifest.json', 48 * 3600),
     'Spotify': ('spotify-backup/backup/current/spotify_backup_current.json', 12 * 3600),
     'vdirsyncer': ('vdirsyncer/state/status/last-success', 4 * 3600),

@@ -35,10 +35,17 @@ def load_json(path: Path) -> dict:
 
 
 def spotify_token_ready() -> bool:
-    try:
-        return bool(load_json(ROOT / "spotify-backup" / "state" / ".cache").get("refresh_token"))
-    except (OSError, ValueError):
-        return False
+    for candidate in (
+        ROOT / "settings" / "auth" / "spotify" / ".cache",
+        ROOT / "auth" / "spotify" / ".cache",
+        ROOT / "spotify-backup" / "state" / ".cache",
+    ):
+        try:
+            if candidate.is_file():
+                return bool(load_json(candidate).get("refresh_token"))
+        except (OSError, ValueError):
+            pass
+    return False
 
 
 def check(config_only: bool = False, include_gmail: bool = False) -> list[str]:
@@ -52,10 +59,21 @@ def check(config_only: bool = False, include_gmail: bool = False) -> list[str]:
         if not value or value == "YOUR_VALUE_HERE" or value.startswith("${"):
             errors.append(f"Missing {name} in .env")
 
+    client_file = None
+    for candidate in (
+        ROOT / "settings" / "auth" / "google" / CLIENT_FILENAME,
+        ROOT / "auth" / "google" / CLIENT_FILENAME,
+        ROOT / "setup" / "google" / CLIENT_FILENAME,
+    ):
+        if candidate.is_file():
+            client_file = candidate
+            break
     try:
-        client = load_google_client(ROOT / "setup" / "google" / CLIENT_FILENAME)
+        if not client_file:
+            raise FileNotFoundError("Client secret missing")
+        client = load_google_client(client_file)
     except (OSError, ValueError, RuntimeError):
-        errors.append("Place a valid Google Desktop client JSON at setup/google/client_secret.json")
+        errors.append("Place a valid Google Desktop client JSON at settings/auth/google/client_secret.json")
         client = None
 
     map_file = ROOT / "settings" / "calendar-pairings.json"
@@ -69,7 +87,12 @@ def check(config_only: bool = False, include_gmail: bool = False) -> list[str]:
     if config_only:
         return errors
 
-    token_dir = ROOT / "vdirsyncer" / "state" / "token"
+    token_dir = ROOT / "settings" / "auth" / "google"
+    if not token_dir.exists() or not any(token_dir.glob("*.json")):
+        for alt in (ROOT / "auth" / "google", ROOT / "vdirsyncer" / "state" / "token"):
+            if alt.exists() and any(alt.glob("*.json")):
+                token_dir = alt
+                break
     token_specs = [
         ("google.json", ("access_token", "refresh_token"), "https://www.googleapis.com/auth/calendar"),
         ("google_contacts.json", ("token", "refresh_token"), "https://www.googleapis.com/auth/contacts"),
@@ -89,10 +112,10 @@ def check(config_only: bool = False, include_gmail: bool = False) -> list[str]:
             if not client or not token_matches_client(payload, client, fields, scope, saved_client_id):
                 raise ValueError("token does not match the current Desktop client and scope")
         except (OSError, ValueError):
-            errors.append(f"Missing or incompatible token: vdirsyncer/state/token/{filename}")
+            errors.append(f"Missing or incompatible token: {token_dir.relative_to(ROOT)}/{filename}")
 
     if not spotify_token_ready():
-        errors.append("Missing or invalid Spotify cache: spotify-backup/state/.cache")
+        errors.append("Missing or invalid Spotify cache: auth/spotify/.cache (or spotify-backup/state/.cache)")
     return errors
 
 

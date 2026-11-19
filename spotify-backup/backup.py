@@ -29,7 +29,9 @@ CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
 REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://127.0.0.1:9000/callback')
 BACKUP_DIR = os.getenv('BACKUP_DIR', '/backup')
 STATE_DIR = os.getenv('STATE_DIR', '/state')
-CACHE_PATH = os.getenv('CACHE_PATH', '/state/.cache')
+CACHE_PATH = os.getenv('CACHE_PATH', '/auth/spotify/.cache')
+if not os.path.exists(CACHE_PATH) and os.path.exists('/state/.cache'):
+    CACHE_PATH = '/state/.cache'
 CURRENT_BACKUP_NAME = 'spotify_backup_current.json'
 PLAYLIST_CACHE_NAME = 'playlist_track_cache.json'
 SNAPSHOT_RETENTION = max(1, int(os.getenv('SPOTIFY_SNAPSHOT_RETENTION', '14')))

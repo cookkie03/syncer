@@ -11,9 +11,10 @@ import shutil
 import sys
 import tempfile
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlparse
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
-TOKEN_DIR = ROOT / "vdirsyncer" / "state" / "token"
+TOKEN_DIR = ROOT / "settings" / "auth" / "google"
 sys.path.insert(0, str(ROOT / "settings"))
 from google_auth import CLIENT_FILENAME, load_google_client, token_matches_client
 
@@ -25,9 +26,28 @@ SERVICES = (
 
 
 def client_file() -> pathlib.Path:
-    path = ROOT / "setup" / "google" / CLIENT_FILENAME
+    for candidate in (
+        ROOT / "settings" / "auth" / "google" / CLIENT_FILENAME,
+        ROOT / "setup" / "google" / CLIENT_FILENAME,
+    ):
+        if candidate.is_file():
+            load_google_client(candidate)
+            return candidate
+    path = ROOT / "settings" / "auth" / "google" / CLIENT_FILENAME
     load_google_client(path)
     return path
+
+
+def extract_code(raw: str) -> str:
+    raw = raw.strip()
+    if "code=" in raw:
+        if "://" not in raw:
+            raw = "http://" + raw
+        parsed = urlparse(raw)
+        qs = parse_qs(parsed.query)
+        if "code" in qs:
+            return qs["code"][0]
+    return raw
 
 
 def save_token(path: pathlib.Path, serialized: str) -> None:
@@ -91,6 +111,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--force", action="store_true", help="Reauthorize existing tokens")
     parser.add_argument("--include-gmail", action="store_true", help="Also authorize Gmail for the disabled Notion export service")
+    parser.add_argument("--port", type=int, default=8090, help="Local server port for OAuth callback (default: 8090)")
+    parser.add_argument("--no-browser", "--manual", dest="no_browser", action="store_true",
+                        help="Modalita in due passaggi per macchine senza browser")
     args = parser.parse_args()
     source = client_file()
     client = load_google_client(source)
@@ -109,16 +132,44 @@ def main() -> int:
             else:
                 print(f"{name}: existing token retained at {destination}")
                 continue
-        print(f"{name}: opening browser for OAuth consent")
         try:
             flow = InstalledAppFlow.from_client_secrets_file(str(source), scopes=[scope])
-            credentials = flow.run_local_server(
-                host="127.0.0.1",
-                port=0,
-                open_browser=True,
-                access_type="offline",
-                prompt="consent",
-            )
+            credentials = None
+            if not args.no_browser:
+                try:
+                    credentials = flow.run_local_server(
+                        host="127.0.0.1",
+                        port=args.port,
+                        open_browser=True,
+                        access_type="offline",
+                        prompt="consent",
+                    )
+                except Exception as exc:
+                    err_msg = str(exc).lower()
+                    if "browser" in err_msg or "display" in err_msg or "x11" in err_msg:
+                        print(f"[{name}] No local browser detected. Switching to two-step manual flow...")
+                        credentials = None
+                    else:
+                        raise
+
+            if credentials is None:
+                os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+                flow = InstalledAppFlow.from_client_secrets_file(str(source), scopes=[scope])
+                flow.redirect_uri = f"http://127.0.0.1:{args.port}/"
+                auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+                print("\n" + "=" * 60)
+                print(f"[{name}] STEP 1: Open this URL in any browser (PC, phone, etc.):")
+                print(auth_url)
+                print("=" * 60)
+                print(f"[{name}] STEP 2: Log in and allow access on Google.")
+                print(f"The browser will redirect to http://127.0.0.1:{args.port}/?code=... (showing an error page; this is normal).")
+                print("Copy the ENTIRE URL from your browser address bar (or just the code value) and paste it below:")
+                print("=" * 60)
+                user_input = input(f"[{name}] Paste redirect URL or code here: ").strip()
+                code = extract_code(user_input)
+                flow.fetch_token(code=code)
+                credentials = flow.credentials
+
             if not credentials.refresh_token:
                 raise RuntimeError("Google returned no refresh token; token was not saved")
             serialized = calendar_token(credentials) if filename == "google.json" else credentials.to_json()

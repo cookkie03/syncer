@@ -6,15 +6,28 @@ Prepara credenziali e autorizzazioni su un PC con browser, copia **tutta la cart
 docker compose up -d --build
 ```
 
+Per un avvio production-grade con preflight, build, attesa degli healthcheck e
+verifica dei backup, usa:
+
+```bash
+bash deploy.sh
+```
+
+Il comando non avvia container se mancano credenziali, token OAuth o abbinamenti
+Calendar validi. Se un servizio diventa unhealthy o non completa il primo backup
+entro il timeout, stampa lo stato e termina con errore.
+
 La directory è anche l'archivio persistente: contiene token, stato dei sync, backup e log. Non copiare soltanto i file tracciati da Git. Il NAS deve poter raggiungere CalDAV, Google, Spotify e Todoist.
 
 | Servizio attivo | Operazione | Frequenza iniziale |
 | --- | --- | --- |
 | `caldav-backup` | Esporta eventi e task CalDAV in ICS con snapshot | 4 ore |
 | `vdirsyncer` | Sincronizza eventi fra CalDAV e Google Calendar | 60 minuti |
+| `google-calendar-backup` | Salva direttamente tutti i calendari Google in ICS con snapshot | 4 ore |
 | `google-contacts-backup` | Salva i contatti Google in VCF con snapshot | 24 ore |
 | `spotify-backup` | Salva profilo, playlist e libreria Spotify | 4 ore |
 | `todoist-backup` | Backup incrementale di Todoist, cronologia e allegati accessibili | Avvio e ogni 4 ore, Europe/Amsterdam |
+| `github-backup` | Mirror Git locale di tutti i repository posseduti e dei repository stellati | Avvio e ogni giorno |
 | `notion-backup` (profilo opzionale `notion`) | API ufficiali: pagine Markdown, database CSV, allegati e JSON | Avvio e ogni 4 ore; una versione |
 
 `vtodo-notion` resta commentato; `notion-backup` è disponibile solo con il profilo Compose `notion`: il comando sopra non lo avvia. Vedi [backup Notion via API ufficiali](#backup-notion-via-api-ufficiali).
@@ -24,7 +37,7 @@ La directory è anche l'archivio persistente: contiene token, stato dei sync, ba
 Esegui i comandi dalla radice della cartella. Servono Python 3, accesso a Internet e un browser.
 
 1. Esegui `bash setup/pc_auth.sh`. Al primo avvio crea `.env` dall'esempio e si ferma.
-2. Compila `.env` con URL, utente e password CalDAV, più ID, secret e redirect URI dell'app Spotify e `TODOIST_API_TOKEN`. Il token Todoist è in **Settings → Integrations → Developer → API token**: inseriscilo solo nel file locale. Non occorre un'app OAuth per Todoist; il primo backup verifica realmente il token e registra l'identità dell'account. L'URL CalDAV deve essere raggiungibile **dal container sul NAS**. Se occorre mappare il nome del server verso l’host Docker, imposta `CALDAV_HOST_ALIAS` nel `.env` con il nome usato da `CALDAV_URL`. Il valore predefinito pubblico è un hostname di esempio non risolvibile; configura il tuo hostname localmente prima di ricreare i servizi CalDAV.
+2. Compila `.env` con URL, utente e password CalDAV, più ID, secret e redirect URI dell'app Spotify, `TODOIST_API_TOKEN` e `GITHUB_TOKEN`. Il token GitHub deve poter leggere i repository dell'account e l'elenco dei repository stellati; inseriscilo solo nel file locale. Il token Todoist è in **Settings → Integrations → Developer → API token**: inseriscilo solo nel file locale. Non occorre un'app OAuth per Todoist; il primo backup verifica realmente il token e registra l'identità dell'account. L'URL CalDAV deve essere raggiungibile **dal container sul NAS**. Se occorre mappare il nome del server verso l’host Docker, imposta `CALDAV_HOST_ALIAS` nel `.env` con il nome usato da `CALDAV_URL`. Il valore predefinito pubblico è un hostname di esempio non risolvibile; configura il tuo hostname localmente prima di ricreare i servizi CalDAV.
 3. Metti il JSON OAuth Google di tipo **Desktop app** in **`setup/google/client_secret.json`** (nome esatto). Se il file scaricato ha un nome più lungo, rinominalo quando lo copi. Questo è l'unico file da cui Calendar, Contacts e l'eventuale Gmail ricavano ID e secret del client Google; non inserire credenziali Google in `.env`. Il progetto deve avere abilitate le API Calendar e People per i servizi attivi.
 4. Prepara `settings/calendar-pairings.json` partendo da `settings/calendar-pairings.example.json`. Per ogni calendario da sincronizzare, indica il nome presente su **entrambi** i servizi e gli ID delle rispettive collezioni. Sostituisci tutti i valori `CHANGE_ME`. Vengono sincronizzati solo i calendari elencati qui. Lo script verifica i nomi e aggiorna gli ID prima di ogni sync; se un nome manca o è ambiguo, blocca le scritture.
 5. Registra `SPOTIFY_REDIRECT_URI` nell'app Spotify con lo stesso valore scritto in `.env`. Per un redirect HTTPS locale servono anche `spotify-backup/cert.pem` e `spotify-backup/key.pem`.
@@ -64,13 +77,20 @@ docker compose logs --tail=100 vdirsyncer
 docker compose exec vdirsyncer /app/sync-notify.sh
 ```
 
-`check-health.sh` controlla che siano avviati solo i cinque servizi previsti, che risultino healthy e che i risultati recenti esistano. Per Todoist mostra anche copertura, cronologia e avanzamento persistente. Il comando `sync-notify.sh` esegue subito il controllo degli abbinamenti e il sync. Il sync di Calendar è bidirezionale; in caso di conflitto prevale CalDAV.
+`check-health.sh` controlla che siano avviati solo i sette servizi previsti, che risultino healthy e che i risultati recenti esistano. Per Todoist mostra anche copertura, cronologia e avanzamento persistente. Il comando `sync-notify.sh` esegue subito il controllo degli abbinamenti e il sync. Il sync di Calendar è bidirezionale; in caso di conflitto prevale CalDAV.
 
-Contacts, Spotify e vdirsyncer possono risultare `healthy` anche se il primo ciclo fallisce: i loro healthcheck controllano le dipendenze Python. CalDAV verifica invece inventario e checksum dello snapshot corrente, età massima di 12 ore e risultato dell’ultimo tentativo: un backup fallito lo rende non healthy. Verifica nei log `Backup complete!` per quei backup e una conclusione senza errori per il sync. Todoist controlla invece i dati persistenti: un errore fatale, un archivio incoerente o 12 ore senza avanzamento lo rendono non healthy; i limiti di copertura restano visibili anche quando il servizio funziona. Spotify salva il profilo, la libreria e i metadati delle playlist seguite; l'API permette di leggere i brani solo delle playlist possedute o collaborative. Il backup registra `playlist_items_unavailable` e `check-health.sh` mostra un avviso quando mancano brani per questo limite. CalDAV, Contacts e Spotify pubblicano `backup/current` solo dopo aver completato il nuovo snapshot. Il collegamento è relativo e portabile. Un errore Spotify 429 interrompe il ciclo e conserva il backup precedente.
+Contacts, Spotify e vdirsyncer possono risultare `healthy` anche se il primo ciclo fallisce: i loro healthcheck controllano le dipendenze Python. CalDAV e `google-calendar-backup` verificano invece inventario, checksum e età massima dello snapshot corrente. I due backup Calendar sono indipendenti: un problema CalDAV non impedisce il backup diretto da Google e viceversa. Verifica nei log `Backup complete!` per i backup e una conclusione senza errori per il sync. Todoist controlla invece i dati persistenti: un errore fatale, un archivio incoerente o 12 ore senza avanzamento lo rendono non healthy; i limiti di copertura restano visibili anche quando il servizio funziona. Spotify salva il profilo, la libreria e i metadati delle playlist seguite; l'API permette di leggere i brani solo delle playlist possedute o collaborative. Il backup registra `playlist_items_unavailable` e `check-health.sh` mostra un avviso quando mancano brani per questo limite. CalDAV, Google Calendar, Contacts e Spotify pubblicano `backup/current` solo dopo aver completato il nuovo snapshot. Il collegamento è relativo e portabile. Un errore Spotify 429 interrompe il ciclo e conserva il backup precedente.
 
-Se l'autorizzazione Google non è più valida, sostituisci se necessario `setup/google/client_secret.json`, esegui sul PC `bash setup/pc_auth.sh --force`, ricopia il JSON e i nuovi token sul NAS e ricrea i container interessati con `docker compose up -d --force-recreate vdirsyncer google-contacts-backup`.
+Se l'autorizzazione Google non è più valida, sostituisci se necessario `setup/google/client_secret.json`, esegui sul PC `bash setup/pc_auth.sh --force`, ricopia il JSON e i nuovi token sul NAS e ricrea i container interessati con `docker compose up -d --force-recreate vdirsyncer google-calendar-backup google-contacts-backup`.
 
 `docker compose down` arresta i container; i dati rimangono nelle directory del progetto.
+
+Il backup diretto Google Calendar usa lo stesso token OAuth Calendar di vdirsyncer, ma legge Google senza passare da CalDAV. Per eseguire un ciclo manuale e verificare lo snapshot:
+
+```bash
+docker compose run --rm --no-deps --entrypoint python3 google-calendar-backup /app/backup.py
+docker compose run --rm --no-deps --entrypoint python3 google-calendar-backup /app/backup.py --health
+```
 
 ## Struttura comune dei servizi
 
@@ -90,17 +110,64 @@ Le directory vengono create quando servono. I servizi di sola sincronizzazione n
 
 | Servizio | Backup corrente | Stato persistente | Log |
 | --- | --- | --- | --- |
-| CalDAV | `caldav-backup/backup/current/`: ICS e `manifest.json` | Nessuno separato | `caldav-backup/logs/` |
-| Google Contacts | `google-contacts-backup/backup/current/`: `contacts/*.vcf`, `all_contacts.vcf`, `manifest.json` | Eventuali file precedenti conservati dalla migrazione | `google-contacts-backup/logs/` |
-| Spotify | `spotify-backup/backup/current/spotify_backup_current.json` | `spotify-backup/state/.cache` contiene OAuth; `playlist_track_cache.json` conserva i brani già ottenuti | `spotify-backup/logs/` |
-| Todoist | `todoist-backup/backup/current/`: SQLite, JSON, CSV e checksum; oggetti condivisi in `backup/objects/` | `todoist-backup/state/`: SQLite e checkpoint | `todoist-backup/logs/` |
-| vdirsyncer | Non produce un backup | `vdirsyncer/state/config/`, `state/status/`, `state/token/` | `vdirsyncer/logs/` |
+| CalDAV (disattivato) | `caldav-backup/backup/current/`: ICS e `manifest.json` | Nessuno separato | `caldav-backup/logs/` |
+| Google Calendar | `google-calendar-backup/backup/current/`: calendari ICS e `manifest.json` | `settings/auth/google/google.json` | `google-calendar-backup/logs/` |
+| Google Contacts | `google-contacts-backup/backup/current/`: `contacts/*.vcf`, `all_contacts.vcf`, `manifest.json` | `settings/auth/google/google_contacts.json` | `google-contacts-backup/logs/` |
+| Spotify | `spotify-backup/backup/current/spotify_backup_current.json` | `settings/auth/spotify/.cache` contiene OAuth; `playlist_track_cache.json` conserva i brani già ottenuti | `spotify-backup/logs/` |
+| Todoist | `todoist-backup/backup/current/`: SQLite, JSON, CSV e checksum; oggetti condivisi in `backup/objects/` | `settings/auth/todoist/token`; `todoist-backup/state/`: SQLite e checkpoint | `todoist-backup/logs/` |
+| vdirsyncer | Non produce un backup | `vdirsyncer/state/config/`, `state/status/`, `settings/auth/google/` | `vdirsyncer/logs/` |
 | Notion, profilo opzionale `notion` | `notion-backup/backup/current/` (Markdown, CSV, allegati, JSON) | inventario in `manifest.json`, esito in `backup/last-run.json` | `notion-backup/logs/` |
+| GitHub | `github-backup/backup/mirrors/<owner>/<repo>.git` | esito e stato in `github-backup/state/status.json` | `github-backup/logs/` |
 | VTODO–Notion, disattivato | Non produce un backup | `vtodo-notion/state/` | `vtodo-notion/logs/` |
 
-I token Google condivisi restano in **`vdirsyncer/state/token/`**: Calendar li monta in scrittura, Contacts in sola lettura; il backup Notion usa soltanto il PAT nel `.env`. Il client Google unico resta in `setup/google/client_secret.json`. Non cancellare token, cache Spotify o stato di vdirsyncer per ripulire i backup.
+I token e le autorizzazioni sono centralizzati nella cartella **`settings/auth/`**:
+- **`settings/auth/google/`**: `google.json` (Calendar e vdirsyncer), `google_contacts.json` (Contacts), `client_secret.json`.
+- **`settings/auth/spotify/`**: `.cache` (token OAuth PKCE per Spotify).
+- **`settings/auth/todoist/`**: `token` (API token personale per Todoist).
 
-`backup/current` è un collegamento relativo allo snapshot completo corrente per CalDAV, Contacts e Spotify. CalDAV esporta un nuovo insieme completo di ICS; Contacts crea un insieme completo di VCF e usa hardlink per i contatti invariati; Spotify scrive un nuovo JSON completo. Nessun servizio sposta i file del backup corrente durante la raccolta dei nuovi dati. Un errore di raccolta lascia il precedente backup corrente disponibile.
+Entrambi gli script di autorizzazione (`setup/google/authorize-desktop.py` e `spotify-backup/auth_helper.py`) supportano la modalità interattiva in due passaggi (browserless/headless): stampano l'URL da aprire su qualsiasi dispositivo e accettano l'URL di reindirizzamento o il codice incollato nel terminale.
+
+Non cancellare i token in `settings/auth/`, la cache Spotify o lo stato dei backup per ripulire i dati.
+
+### Backup GitHub
+
+`github-backup` usa `GITHUB_TOKEN` per leggere tutti i repository posseduti
+dall'account autenticato e tutti i repository stellati. Un repository presente in
+entrambi gli insiemi viene salvato una sola volta. Ogni mirror è un repository Git
+bare sotto `github-backup/backup/mirrors/`, mentre stato e log sono persistenti
+nelle directory omonime. Gli aggiornamenti vengono prima raccolti in una directory
+temporanea e il mirror precedente viene sostituito soltanto dopo un clone riuscito.
+
+#### Permessi del token GitHub
+
+Per un **fine-grained personal access token**, assegna:
+
+- accesso ai repository da sincronizzare, inclusi quelli privati;
+- **Contents: Read-only**;
+- **Metadata: Read-only** (normalmente attivo automaticamente);
+- permesso account **Starring: Read-only**.
+
+Il token deve poter leggere anche i repository privati che hai aggiunto ai
+preferiti. GitHub non può concedere accesso a repository privati che il tuo
+account non può già leggere. In alternativa, un **classic personal access token**
+richiede lo scope `repo` per clonare repository privati; non servono permessi di
+scrittura, amministrazione, cancellazione o gestione dell'organizzazione.
+
+I repository non più restituiti dall'API non vengono eliminati: restano locali e
+sono indicati come `stale_repositories` nello stato. La rimozione è disattivata per
+default; se viene abilitata con `GITHUB_REMOVE_STALE=1`, il servizio calcola la
+percentuale di mirror da rimuovere rispetto ai mirror esistenti. Se supera il 50%
+(configurabile con `GITHUB_MAX_DELETION_RATIO`), blocca tutta la pulizia, conserva
+ogni mirror e registra un errore esplicito nel log e nello stato. Per eseguire
+subito un mirror:
+
+```bash
+docker compose exec -T github-backup python /app/backup.py
+docker compose exec -T github-backup python /app/backup.py --health
+docker compose logs --tail=100 github-backup
+```
+
+`backup/current` è un collegamento relativo allo snapshot completo corrente per CalDAV, Google Calendar, Contacts e Spotify. CalDAV e Google Calendar esportano un nuovo insieme completo di ICS; Contacts crea un insieme completo di VCF e usa hardlink per i contatti invariati; Spotify scrive un nuovo JSON completo. Nessun servizio sposta i file del backup corrente durante la raccolta dei nuovi dati. Un errore di raccolta lascia il precedente backup corrente disponibile.
 
 ### Verificare CalDAV
 

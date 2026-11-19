@@ -68,6 +68,10 @@ def publish_snapshot(staging: Path, backup_root: Path, retention: int,
     if snapshot.exists() or snapshot.is_symlink():
         raise FileExistsError(snapshot)
     staging.rename(snapshot)
+    try:
+        snapshot.chmod(0o755)
+    except OSError:
+        pass
     current = point_current(backup_root, snapshot)
     prune_snapshots(backup_root, retention)
     return current
